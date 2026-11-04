@@ -1,0 +1,7 @@
+fastapi==0.162.0
+uvicorn==0.54.0
+SQLAlchemy==2.1.6
+PyMySQL==1.2.3
+pyodps==0.13.2
+httpx==0.28.1
+pytest==9.1.1

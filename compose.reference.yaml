@@ -1,0 +1,10 @@
+# Optional local CSV snapshot. Keep business data outside the application image.
+services:
+  app:
+    environment:
+      REFERENCE_CSV_PATH: /app/data/reference.csv
+    volumes:
+      - type: bind
+        source: ./参考数据.csv
+        target: /app/data/reference.csv
+        read_only: true

@@ -1,0 +1,12 @@
+node_modules
+.pnpm-store
+.venv
+data
+backups
+.env
+.git
+dist
+__pycache__
+.pytest_cache
+参考UI.html
+*.csv

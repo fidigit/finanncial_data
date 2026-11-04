@@ -1,0 +1,25 @@
+node_modules/
+.pnpm-store/
+dist/
+.venv/
+.env*
+!.env.example
+__pycache__/
+.pytest_cache/
+data/
+*.db
+*.db-*
+*.db.*
+backups/
+# Business exports, account stores and screenshots stay on the deployment machine.
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.sqlite*
+*.pem
+*.key
+*.zip
+/参考UI.html
+/docs/*.png
+/docs/*.jpg
