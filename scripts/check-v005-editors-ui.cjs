@@ -1,0 +1,44 @@
+const assert=require('node:assert/strict');
+const {chromium}=require(process.env.PLAYWRIGHT_PATH||'playwright');
+(async()=>{
+ const base=process.env.QA_URL||'http://127.0.0.1:18081/';if(new URL(base).port!=='18081')throw Error('Isolated port 18081 required for configuration edits');
+ const browser=await chromium.launch({channel:'msedge',headless:true});let page;
+ try{
+  page=await browser.newPage({viewport:{width:1440,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto(base);await page.getByLabel('账号',{exact:true}).fill('admin');await page.getByLabel('密码',{exact:true}).fill('Demo2026!');await page.getByRole('button',{name:/登录工作台/}).click();
+  const sales=page.locator('.commission-data-card').first();await sales.locator('.sales-blue-gear').first().waitFor();
+  const api=async path=>{const r=await page.request.get(new URL('/api'+path,base).href);assert(r.ok(),await r.text());return r.json()};
+  const response=pattern=>page.waitForResponse(r=>r.url().includes(pattern)&&['PUT','POST'].includes(r.request().method()));
+  const select=async(label,value)=>{await page.getByRole('combobox',{name:label,exact:true}).fill(value);await page.locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)').locator('.ant-select-item-option').filter({hasText:new RegExp('^'+value+'$')}).click()};
+  const close=async()=>{await page.locator('.sales-source-modal-wrap .ant-modal-close').click();await page.locator('.sales-source-modal').waitFor({state:'hidden'})};
+  await sales.locator('.sales-source-entries button').nth(1).click();const target=page.getByLabel('季度目标编辑器');await target.getByRole('spinbutton').first().waitFor();
+  const q3=await api('/bonus-config/targets?quarter=2026Q3');assert(q3.rows.length>=7);assert.equal(await target.locator('.ant-pagination').count(),0);
+  await select('目标季度','2026Q4');await target.getByRole('button',{name:'沿袭上一季度目标',exact:true}).waitFor();
+  let saved=response('/targets/2026Q4/inherit');await target.getByRole('button',{name:'沿袭上一季度目标',exact:true}).click();assert((await saved).ok());await target.getByRole('spinbutton',{name:'何卫直接营收目标',exact:true}).waitFor();
+  const copied=await api('/bonus-config/targets?quarter=2026Q4');assert(copied.rows.length>=8);const previous=q3.rows.find(r=>r.BD姓名==='何卫')['直接营收目标'];
+  await target.getByRole('spinbutton',{name:'何卫直接营收目标',exact:true}).fill('280000');saved=response('/targets/2026Q4');await target.getByRole('button',{name:'保存本季度目标',exact:true}).click();assert((await saved).ok());
+  await select('目标季度','2026Q3');await page.waitForFunction(()=>Number(document.querySelector('[aria-label="何卫直接营收目标"]')?.value)===260000);assert.equal(Number(await target.getByRole('spinbutton',{name:'何卫直接营收目标',exact:true}).inputValue()),Number(previous));
+  await select('目标季度','2026Q4');await page.waitForFunction(()=>Number(document.querySelector('[aria-label="何卫直接营收目标"]')?.value)===280000);
+  await select('目标季度','2027Q1');saved=response('/targets/2027Q1/inherit');await target.getByRole('button',{name:'沿袭上一季度目标',exact:true}).click();assert((await saved).ok());await page.waitForFunction(()=>Number(document.querySelector('[aria-label="何卫直接营收目标"]')?.value)===280000);
+  await page.screenshot({path:'docs/v005-quarter-targets.png'});await close();console.log('PASS quarterly editor: initial data, empty-quarter plus, all BD copy, edit/save, quarter isolation, cross-year Q1 inheritance');
+  await sales.locator('.sales-source-entries button').nth(2).click();const plan=page.getByLabel('年度奖金方案编辑器');await plan.locator('.ant-table-tbody tr.ant-table-row').first().waitFor();
+  const initialPlan=await api('/bonus-config/plans?year=2025');assert.equal(await plan.locator('.ant-table-tbody tr.ant-table-row').count(),initialPlan.rows.length);assert.equal(await plan.locator('.ant-pagination').count(),0);
+  await select('方案年份','2026年');saved=response('/plans/2026/inherit');await plan.getByRole('button',{name:'沿袭上一年奖金方案',exact:true}).click();assert((await saved).ok());
+  const choice=plan.getByRole('combobox',{name:'收费系统户数是否计入提成范围',exact:true});await choice.click();await page.locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)').locator('.ant-select-item-option').filter({hasText:/^否$/}).click();
+  await page.waitForFunction(()=>document.querySelector('[aria-label="收费系统户数是否计入提成范围"]')?.closest('td')?.innerText?.includes('否'));
+  await plan.getByRole('button',{name:'新增奖金来源',exact:true}).click();await plan.getByRole('textbox',{name:'新增奖金来源名称',exact:true}).fill('马克智能水电表');
+  saved=response('/plans/2026');await plan.getByRole('button',{name:'保存本年方案',exact:true}).click();assert((await saved).ok());
+  const current=await api('/bonus-config/plans?year=2026');assert.equal(current.rows.find(r=>r.所购服务==='收费系统户数')['是否计入提成范围'],'否');assert.equal(current.rows.find(r=>r.所购服务==='马克智能水电表')['是否计入提成范围'],'是');
+  assert.deepEqual((await api('/bonus-config/plans?year=2025')).rows,initialPlan.rows);
+  const salesRows=await api('/commission-data?category=sales&search=收费系统户数&page_size=100');assert(salesRows.rows.length>0&&salesRows.rows.every(r=>r.enabled===false||r.confirmation.enabled===true));
+  await select('方案年份','2027年');saved=response('/plans/2027/inherit');await plan.getByRole('button',{name:'沿袭上一年奖金方案',exact:true}).click();assert((await saved).ok());await plan.getByText('马克智能水电表',{exact:true}).waitFor();
+  await page.screenshot({path:'docs/v005-annual-plan.png'});await close();console.log('PASS annual editor: full-page initial plan, blank year, yearly inheritance, yes/no edits, new service, payment-year calculation and previous-year isolation');
+  await sales.locator('.sales-source-entries button').nth(5).click();const constants=page.getByLabel('公共常数编辑器');await constants.getByRole('spinbutton',{name:'公共常数团队VIP金额下限（元）',exact:true}).fill('2000');
+  saved=response('/bonus-config/constants');await constants.getByRole('button',{name:'保存公共常数',exact:true}).click();assert((await saved).ok());await page.screenshot({path:'docs/v005-constants.png'});await close();
+  const gear=sales.getByRole('button',{name:'是否计发提成公式',exact:true});await gear.click();const formula=page.getByLabel('是否计发提成公式内容',{exact:true});await formula.getByRole('spinbutton',{name:'团队VIP金额下限（元）',exact:true}).waitFor();await page.waitForFunction(()=>Number(document.querySelector('.sales-formula-viewport input')?.value)===2000);
+  saved=response('/parameters/S');await formula.getByRole('button',{name:'恢复1680元并保存',exact:true}).click();assert((await saved).ok());await gear.click();await formula.waitFor({state:'hidden'});
+  await sales.locator('.sales-source-entries button').nth(5).click();await constants.getByRole('spinbutton').first().waitFor();await page.waitForFunction(()=>Number(document.querySelector('[aria-label="公共常数团队VIP金额下限（元）"]')?.value)===1680);await close();
+  console.log('PASS constants editor: save synchronizes blue gear; gear reset synchronizes constants');
+  assert.equal((await api('/health')).version,'0.0.5');assert.deepEqual(errors,[]);console.log('PASS v0.0.5 end-to-end; all mutations limited to isolated QA database');
+ }catch(e){if(page){await page.screenshot({path:'docs/v005-ui-failure.png'}).catch(()=>{});}throw e;}finally{await browser.close()}
+})().catch(e=>{console.error(e);process.exit(1)});

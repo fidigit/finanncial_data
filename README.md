@@ -1,17 +1,23 @@
-# 商务数据分析网站 v0.0.1
+# 商务数据分析网站 v0.0.6
 
 根据《BD奖金计算与查询系统_最终需求文档_V1.0.md》实现的系统设计与可运行基础版。
 
-发布版本：`v0.0.1`。仓库：[fidigit/finanncial_data](https://github.com/fidigit/finanncial_data)。
+发布版本：`v0.0.6`。仓库：[fidigit/finanncial_data](https://github.com/fidigit/finanncial_data)。
 
-跨机器Windows部署及数据保留操作：[v0.0.1部署手册](docs/deployment-v0.0.1.md)。
+跨机器Windows部署及数据保留操作：[v0.0.6跨机器部署与数据迁移](docs/deployment-v0.0.6-transfer.md)。
 
 - 设计：[商务数据分析网站_系统设计_V1.0.md](docs/商务数据分析网站_系统设计_V1.0.md)
 - 栈：React + TypeScript + Ant Design / FastAPI / SQLAlchemy
 - 部署：Docker Compose + MySQL；开发演示可用 SQLite
 - 数据源：MySQL、MaxCompute，预留多表和字段映射。
 
-## 当前能力与边界
+## v0.0.6 当前功能
+
+首页包含业务参考数据、销售奖金、市场奖金和会议奖金。支持BD身份归类与本人数据隔离，销售固定公式及可调全局参数、按季度营收目标、按年份服务方案，备注维护及受控XLSX状态回传。按姓名分Sheet导出，只读列无填充、深灰字体，回传核对当前账号最新版本后只更新发放/退款状态。
+
+账号、密码哈希、权限、主题、数据源/数据集查询配置、奖金方案、季度目标、备注与状态均保存在数据库；原始查询数据来自CSV，源头样例另保存在data目录。跨机器必须迁移运行数据，不能仅克隆代码。参见[v0.0.6部署命令](docs/deployment-v0.0.6-transfer.md)。
+
+## v0.0.1历史说明（部分限制已在后续版本实现）
 
 已实现账号登录与停用、服务端本人数据隔离、演示奖金查询/详情/CSV导出、5套主题按账号保存、数据源配置/真实探测/元数据、数据集映射草稿及基础审计。
 

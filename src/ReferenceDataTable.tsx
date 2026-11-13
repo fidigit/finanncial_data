@@ -38,8 +38,7 @@ export default function ReferenceDataTable() {
       } catch { /* Data queries enforce the current policy even when status polling fails. */ }
     };
     readPolicy();
-    const timer = window.setInterval(readPolicy, 15000);
-    return () => { active = false; window.clearInterval(timer); };
+    return () => { active = false; };
   }, []);
   useEffect(() => {
     const current = ++sequence.current;

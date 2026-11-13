@@ -27,7 +27,7 @@ def _read_snapshot(path: str, modified: int, size: int):
     return columns, rows, sum(n - 1 for n in order_counts.values())
 
 
-def query_reference(page=1, page_size=20, search='', quarter='', owner='', project='', ownership='', allowed_owner=None):
+def query_reference(page=1, page_size=20, search='', quarter='', owner='', project='', ownership='', allowed_owner=None, allowed_owners=None):
     path = Path(os.getenv('REFERENCE_CSV_PATH', str(DEFAULT_FILE)))
     if not path.is_file():
         raise HTTPException(404, '参考数据文件尚未配置，请将参考数据.csv放入项目目录或配置 REFERENCE_CSV_PATH')
@@ -41,6 +41,8 @@ def query_reference(page=1, page_size=20, search='', quarter='', owner='', proje
         rows = [r for r in rows if r['values'].get('BD姓名', '').strip() == allowed_owner]
         order_counts = Counter(r['values'].get('订单号', '') for r in rows if r['values'].get('订单号', ''))
         duplicates = sum(n - 1 for n in order_counts.values())
+    if allowed_owners is not None:
+        rows = [r for r in rows if r['values'].get('BD姓名', '').strip() in allowed_owners]
     options = {
         key: sorted({r['values'].get(field, '') for r in rows if r['values'].get(field, '')}, reverse=key == 'quarters')
         for key, field in [('quarters', '季度'), ('owners', 'BD姓名'), ('projects', '付费项目'), ('ownerships', '有/无归属BD')]

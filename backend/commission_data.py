@@ -32,7 +32,7 @@ def project_row(row, rule=None, confirmation=None):
         'paid_date': paid_date, 'service': values.get('付费项目', ''),
         'purchase_type': values.get('首购/续费', ''), 'order_amount': values.get('订单金额', ''),
         'enabled': enabled, 'rule_enabled': rule.get('enabled') if rule else None,
-        'rule_note': rule.get('note', '') if rule else '',
+        'rule_note': rule.get('note', '') if rule else '', 'rule_issue': rule.get('issue', '') if rule else '',
         'shared_bd': confirmed.get('shared_bd', ''), 'allocation_ratio': confirmed.get('allocation_ratio'),
         'bonus_basis': confirmed.get('bonus_basis'),
         'market_bd': confirmed.get('market_bd', ''),
@@ -43,3 +43,18 @@ def project_row(row, rule=None, confirmation=None):
         'note': confirmed.get('note', ''), 'source_bonus': values.get('奖金金额', ''),
         'version': confirmed.get('version', 0), 'confirmation': confirmed,
     }
+
+
+def with_display_note(row):
+    """Expose exactly the editable note shown on screen, including the initial generated text."""
+    confirmed = row.get('confirmation', {})
+    if 'note_override' in confirmed:
+        row['note'] = confirmed['note_override']
+    else:
+        parts = [row.get('note') or row.get('rule_note', '')]
+        calculation = row.get('calculation') or {}
+        parts.extend(calculation.get('problems', []))
+        if calculation.get('overrides'):
+            parts.append('人工覆盖：' + '、'.join(calculation['overrides']))
+        row['note'] = '\n'.join(str(p) for p in parts if p)
+    return row

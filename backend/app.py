@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import Boolean, Integer, Numeric, String, Text, create_engine, delete, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from backend.reference_data import query_reference
-from backend.commission_data import service_key, record_key, project_row
+from backend.commission_data import service_key, record_key, project_row, with_display_note
 
 ROOT = Path(__file__).resolve().parent.parent
 DEMO = os.getenv('DEMO_MODE', 'true').lower() == 'true'
@@ -110,6 +110,14 @@ def audit(db, actor, action):
 def initialize():
     Base.metadata.create_all(engine)
     with Session(engine) as db:
+        from backend.bonus_rules import initialize_rule_sources
+        initialize_rule_sources(db)
+        if not db.get(SystemSetting, 'bd_categories'):
+            names = ['何卫', '余飞', '周政', '屈敬东', '崔赵鹏', '曾德康', '杨红星', '贺庆锋']
+            secrets.SystemRandom().shuffle(names)
+            mapping = {name: 'sales' if i < 4 else 'market' for i, name in enumerate(names)}
+            db.add(SystemSetting(key='bd_categories', value=json.dumps(mapping, ensure_ascii=False), version=1))
+            db.commit()
         if not db.get(SystemSetting, 'reference_bd_self_only'):
             db.add(SystemSetting(key='reference_bd_self_only', value='true', version=1))
             db.commit()
@@ -142,7 +150,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title='商务数据分析 API', version='0.0.1', lifespan=lifespan, docs_url='/api/docs' if DEMO else None, redoc_url=None, openapi_url='/api/openapi.json' if DEMO else None)
+app = FastAPI(title='商务数据分析 API', version='0.0.6', lifespan=lifespan, docs_url='/api/docs' if DEMO else None, redoc_url=None, openapi_url='/api/openapi.json' if DEMO else None)
 
 
 @app.middleware('http')
@@ -379,28 +387,42 @@ class ReferencePolicyBody(BaseModel):
 
 
 def commission_snapshot(db, user, **filters):
-    setting = db.get(SystemSetting, 'reference_bd_self_only')
-    allowed_owner = user.name if user.role == 'bd' and (not setting or setting.value == 'true') else None
+    allowed_owner = user.name.strip() if user.role == 'bd' else None
+    category = filters.pop('category', '')
+    if category:
+        setting = db.get(SystemSetting, 'bd_categories')
+        mapping = json.loads(setting.value) if setting else {}
+        filters['allowed_owners'] = {name for name, kind in mapping.items() if kind == category}
     return query_reference(allowed_owner=allowed_owner, **filters)
 
 
 @app.get('/api/commission-data')
-def commission_data(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), search: str = Query('', max_length=200), quarter: str = Query('', max_length=30), owner: str = Query('', max_length=100), user=Depends(current_user), db: Session = Depends(database)):
-    snapshot = commission_snapshot(db, user, page=page, page_size=page_size, search=search, quarter=quarter, owner=owner)
-    rules = {}
-    pending = []
+def commission_data(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), search: str = Query('', max_length=200), quarter: str = Query('', max_length=30), owner: str = Query('', max_length=100), category: Literal['', 'sales', 'market'] = '', user=Depends(current_user), db: Session = Depends(database)):
+    if category == 'sales':
+        from backend.sales_formulas import sales_response
+        return sales_response(db, user, page, page_size, search, quarter, owner)
+    snapshot = commission_snapshot(db, user, page=page, page_size=page_size, search=search, quarter=quarter, owner=owner, category=category)
+    from backend.bonus_rules import shared_service_rule, GLOBAL_KEY, setting_payload, order_year, YEAR_PLAN_PREFIX
+    settings = {s.key: s for s in db.scalars(select(SystemSetting))}
+    minimum = setting_payload(settings, GLOBAL_KEY).get('vip_minimum', '1680')
+    rules, pending = {}, []
     for service in snapshot['options']['projects']:
-        setting = db.get(SystemSetting, service_key(service))
-        if setting:
-            rules[service] = json.loads(setting.value)
+        rule = shared_service_rule(settings, service, vip_minimum=minimum, year=None)
+        if rule:
+            rules[service] = rule
         else:
             pending.append(service)
     records = []
     for row in snapshot['rows']:
-        setting = db.get(SystemSetting, record_key(row))
+        setting = settings.get(record_key(row))
         confirmation = {**json.loads(setting.value), 'version': setting.version} if setting else None
-        records.append(project_row(row, rules.get(row['values'].get('付费项目', '')), confirmation))
-    return {'rows': records, 'total': snapshot['total'], 'options': snapshot['options'], 'pending_services': pending, 'can_edit': user.role in ('admin', 'superadmin'), 'rules': rules}
+        values = row['values']
+        rule = shared_service_rule(settings, values.get('付费项目', ''), values.get('订单金额'), minimum, order_year(values))
+        if rule:
+            rules[values.get('付费项目', '')] = rule
+        records.append(with_display_note(project_row(row, rule, confirmation)))
+    pending = sorted({r['service'] for r in records if r['enabled'] is None})
+    return {'rows': records, 'total': snapshot['total'], 'options': snapshot['options'], 'pending_services': pending, 'can_edit': user.role in ('admin', 'superadmin'), 'can_edit_note': True, 'rules': rules}
 
 
 class ServiceRuleBody(BaseModel):
@@ -414,6 +436,11 @@ def save_service_rule(body: ServiceRuleBody, user=Depends(admin), db: Session = 
     services = commission_snapshot(db, user)['options']['projects']
     if body.service not in services:
         raise HTTPException(422, '所购服务不存在，请刷新列表')
+    if body.service == '团队VIP':
+        raise HTTPException(422, '团队VIP按全局金额下限判断，请通过是否计发提成的齿轮设置')
+    from backend.bonus_rules import YEAR_PLAN_PREFIX
+    if db.scalar(select(SystemSetting.key).where(SystemSetting.key.like(YEAR_PLAN_PREFIX+'%')).limit(1)):
+        raise HTTPException(409, '请在奖金方案中选择年份并维护本年度规则')
     key = service_key(body.service)
     rule = db.get(SystemSetting, key)
     if rule:
@@ -462,6 +489,29 @@ def save_commission_confirmation(body: CommissionConfirmationBody, user=Depends(
     audit(db, user.username, '人工确认提成记录：' + row['values'].get('订单号', '') + '，来源行' + str(row['row_id']))
     db.commit()
     return {'ok': True}
+
+
+class CommissionNoteBody(BaseModel):
+    model_config = {'extra': 'forbid'}
+    record_key: str = Field(pattern=r'^commission_record_[a-f0-9]{40}$')
+    version: int = Field(ge=0)
+    note: str = Field(max_length=4000)
+
+
+@app.put('/api/commission-data/note')
+def save_commission_note(body: CommissionNoteBody, user=Depends(current_user), db: Session=Depends(database)):
+    from backend.bonus_v2 import save_setting
+    rows = commission_snapshot(db, user, page_size=1000000)['rows']
+    row = next((r for r in rows if record_key(r)==body.record_key), None)
+    if not row:
+        raise HTTPException(409, '来源记录已变化或无权限，请重新加载')
+    previous = db.get(SystemSetting, body.record_key)
+    payload = json.loads(previous.value) if previous else {}
+    payload['note_override'] = body.note
+    save_setting(db, body.record_key, json.dumps(payload, ensure_ascii=False), body.version)
+    audit(db,user.username,'修改订单备注：'+row['values'].get('订单号','')+'，来源行'+str(row['row_id']))
+    db.commit()
+    return {'ok':True}
 
 
 @app.put('/api/reference-data/policy')
@@ -643,6 +693,12 @@ def active_user(user_id: int, body: ActiveBody, user=Depends(admin), db: Session
     db.commit()
     return {'ok': True}
 
+
+from backend import bonus_v2  # Register API routes before the frontend catch-all.
+from backend import sales_formulas
+from backend import sales_workspace
+from backend import bonus_config
+from backend import bonus_transfer
 
 if (ROOT / 'dist').is_dir():
     app.mount('/', StaticFiles(directory=ROOT / 'dist', html=True), name='frontend')

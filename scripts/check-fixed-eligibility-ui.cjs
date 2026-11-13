@@ -1,0 +1,66 @@
+const assert = require('node:assert/strict');
+const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
+(async () => {
+  const base = process.env.QA_URL || 'http://127.0.0.1:18081/';
+  if (new URL(base).port !== '18081') throw Error('Mutating check requires isolated QA port 18081');
+  const browser = await chromium.launch({ channel: 'msedge', headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const errors = []; page.on('pageerror', e => errors.push(e.message));
+    await page.goto(base);
+    await page.getByLabel('账号', { exact:true }).fill('admin');
+    await page.getByLabel('密码', { exact:true }).fill('Demo2026!');
+    await page.getByRole('button', { name:/登录工作台/ }).click();
+    const sales = page.locator('.commission-data-card').first();
+    await sales.getByRole('button', { name:'是否计发提成公式',exact:true }).waitFor();
+    async function api(path) { const response = await page.request.get(new URL('/api'+path,base).href); assert(response.ok(),await response.text()); return response.json(); }
+    const definitions = await api('/sales-formulas/definitions');
+    const others = definitions.definitions.filter(r=>r.column!=='S');
+    const list = await api('/commission-data?'+new URLSearchParams({category:'sales',owner:'杨红星',search:'团队VIP',page_size:'100'}));
+    const chosen = list.rows.find(r=>Number(r.order_amount)===1680 && r.purchase_type==='续费' && !Object.keys(r.confirmation).length);
+    assert(chosen && chosen.enabled && Number(chosen.bonus)>0);
+    async function row() { const list = await api('/commission-data?'+new URLSearchParams({category:'sales',owner:chosen.owner,search:chosen.order_no})); return list.rows.find(r=>r.record_key===chosen.record_key); }
+    const before = await row();
+    await sales.getByLabel('搜索提成确认明细').fill(chosen.order_no);
+    const loaded = page.waitForResponse(r=>r.url().includes('/api/commission-data?')&&r.url().includes('search='+chosen.order_no));
+    await sales.getByLabel('搜索提成确认明细').press('Enter'); await loaded;
+    await sales.getByRole('button',{name:'是否计发提成公式',exact:true}).click();
+    const popup = page.getByLabel('是否计发提成公式内容');
+    const amount = popup.getByLabel('团队VIP金额下限（元）',{exact:true}); await amount.waitFor();
+    await page.waitForFunction(()=>{const e=document.querySelector('.sales-eligibility-rule .sales-fixed-parameter input');return e && !e.disabled && Number(e.value)===1680;});
+    assert.equal(await popup.locator('textarea').count(),0);
+    assert.equal(await popup.getByRole('spinbutton').count(),1);
+    assert.deepEqual(await popup.evaluate(e=>[e.offsetWidth,e.offsetHeight]),[500,400]);
+    const text = await popup.getByLabel('是否计发提成完整计算规则').innerText();
+    assert(text.includes('所购服务')&&text.includes('订单金额')&&text.includes('2025年奖金方案')&&text.includes('Check'));
+    await page.screenshot({path:'docs/sales-eligibility-fixed-rule.png'});
+    await amount.fill('2000');
+    let result = page.waitForResponse(r=>r.url().endsWith('/api/sales-formulas/parameters/S/preview'));
+    await popup.getByRole('button',{name:/试\s*算/}).click();
+    const trial = await (await result).json(); assert(trial.valid && trial.bonus_changed_count>0);
+    assert.equal((await row()).bonus,before.bonus);
+    result = page.waitForResponse(r=>r.url().endsWith('/api/sales-formulas/parameters/S')&&r.request().method()==='PUT');
+    await popup.getByRole('button',{name:'保存参数',exact:true}).click(); assert((await result).ok());
+    await page.getByText('团队VIP金额下限已保存并重新计算',{exact:true}).waitFor();
+    const changed = await row(); assert.equal(changed.enabled,false); assert.equal(Number(changed.bonus),0);
+    await page.mouse.click(1300,100);
+    await sales.getByRole('button',{name:'是否计发提成参数配置',exact:true}).click();
+    const purple = page.getByLabel('是否计发提成参数输入区');
+    const purpleAmount = purple.getByRole('spinbutton'); await purpleAmount.waitFor();
+    await page.waitForFunction(()=>{const e=document.querySelector('.sales-parameter-viewport input');return e && Number(e.value)===2000;});
+    assert.deepEqual(await purple.evaluate(e=>[e.offsetWidth,e.offsetHeight]),[200,150]);
+    await page.mouse.click(1300,100);
+    await sales.getByRole('button',{name:'是否计发提成公式',exact:true}).click();
+    await page.waitForFunction(()=>{const e=document.querySelector('.sales-eligibility-rule .sales-fixed-parameter input');return e && !e.disabled && Number(e.value)===2000;});
+    result = page.waitForResponse(r=>r.url().endsWith('/api/sales-formulas/parameters/S')&&r.request().method()==='PUT');
+    await popup.getByRole('button',{name:'恢复1680元并保存',exact:true}).click(); assert((await result).ok());
+    await page.getByText('团队VIP金额下限已恢复为1680元',{exact:true}).waitFor();
+    assert.equal((await row()).bonus,before.bonus);
+    await page.mouse.click(1300,100);
+    await sales.getByRole('button',{name:'奖金计算基数公式',exact:true}).click();
+    const otherRule = page.getByLabel('奖金计算基数完整计算规则'); await otherRule.waitFor(); assert.equal(await page.getByLabel('奖金计算基数公式内容').locator('textarea').count(),0);
+    assert.deepEqual((await api('/sales-formulas/definitions')).definitions.filter(r=>r.column!=='S'),others);
+    assert.deepEqual(errors,[]);
+    console.log('PASS: S expanded fixed rule with one amount input; preview has no writes; save affects eligibility/bonus; blue-purple sync; reset restores; other four formulas unchanged. QA data only.');
+  } finally { await browser.close(); }
+})().catch(e=>{console.error(e);process.exit(1)});
