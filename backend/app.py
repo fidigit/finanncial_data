@@ -17,7 +17,7 @@ from typing import Literal
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictBool, model_validator
 from sqlalchemy import Boolean, Integer, Numeric, String, Text, create_engine, delete, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from backend.reference_data import query_reference
@@ -150,7 +150,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title='商务数据分析 API', version='0.0.6', lifespan=lifespan, docs_url='/api/docs' if DEMO else None, redoc_url=None, openapi_url='/api/openapi.json' if DEMO else None)
+app = FastAPI(title='商务数据分析 API', version='0.0.7', lifespan=lifespan, docs_url='/api/docs' if DEMO else None, redoc_url=None, openapi_url='/api/openapi.json' if DEMO else None)
 
 
 @app.middleware('http')
@@ -489,6 +489,44 @@ def save_commission_confirmation(body: CommissionConfirmationBody, user=Depends(
     audit(db, user.username, '人工确认提成记录：' + row['values'].get('订单号', '') + '，来源行' + str(row['row_id']))
     db.commit()
     return {'ok': True}
+
+
+class CommissionEligibilityBody(BaseModel):
+    model_config = {'extra': 'forbid'}
+    record_key: str = Field(pattern=r'^commission_record_[a-f0-9]{40}$')
+    version: int = Field(ge=0)
+    enabled: StrictBool | None
+
+
+@app.put('/api/commission-data/eligibility')
+def save_commission_eligibility(body: CommissionEligibilityBody, user=Depends(admin), db: Session=Depends(database)):
+    from backend.bonus_v2 import save_setting
+    rows = commission_snapshot(db,user,page_size=1000000)['rows']
+    row = next((r for r in rows if record_key(r)==body.record_key),None)
+    if row is None:
+        raise HTTPException(409,'来源记录已变化，请重新加载')
+    previous=db.get(SystemSetting,body.record_key)
+    payload=json.loads(previous.value) if previous else {}
+    from backend.bonus_rules import shared_service_rule, order_year
+    from backend.sales_formulas import global_parameters
+    settings={s.key:s for s in db.scalars(select(SystemSetting))}
+    values=row['values']
+    original=shared_service_rule(settings,values.get('付费项目',''),values.get('订单金额'),
+                                 global_parameters(settings)['vip_minimum'],order_year(values)).get('enabled')
+    old_note=payload.pop('eligibility_note',None)
+    if old_note and 'note_override' in payload:
+        payload['note_override']='\n'.join(line for line in payload['note_override'].split('\n') if line!=old_note)
+    if body.enabled is None or body.enabled == original:
+        payload.pop('enabled',None)
+    else:
+        payload['enabled']=body.enabled
+        initial='待设置规则' if original is None else '是' if original else '否'
+        payload['eligibility_note']=f'人工修改计提资格：{initial} → {"是" if body.enabled else "否"}'
+    save_setting(db,body.record_key,json.dumps(payload,ensure_ascii=False),body.version)
+    state='恢复公式' if body.enabled is None else '是' if body.enabled else '否'
+    audit(db,user.username,f'修改单笔计提资格：来源行{row["row_id"]}，{state}')
+    db.commit()
+    return {'ok':True}
 
 
 class CommissionNoteBody(BaseModel):

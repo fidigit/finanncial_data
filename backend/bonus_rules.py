@@ -101,13 +101,21 @@ def shared_service_rule(settings, service, amount=None, vip_minimum='1680', year
             return {'enabled': None, 'issue': 'missing_year_plan', 'note': f'缺少{year}年奖金方案，请在奖金方案中选择{year}年并沿袭上一年'}
         plan = setting_payload(settings, year_plan_key(year))
         row = next((r for r in plan.get('rows', []) if r['所购服务'] == service), None)
-        return {'enabled': row['是否计入提成范围'] == '是', 'note': f'来源：{year}年奖金方案'} if row else {'enabled': None, 'issue': 'missing_service', 'note': f'{year}年奖金方案未配置服务：{service}，请新增该服务并设置是否计提'}
+        if row and row.get('是否计入提成范围') in ('是', '否'):
+            return {'enabled': row['是否计入提成范围'] == '是', 'note': f'来源：{year}年奖金方案'}
+        return {'enabled': None, 'issue': 'missing_service', 'note': f'{year}年奖金方案未确认服务：{service}，请设置是否计提'}
     override = setting_payload(settings, service_key(service))
     if override:
         return override
     plan = setting_payload(settings, PLAN_KEY)
     row = next((r for r in plan.get('rows', []) if r['所购服务'] == service), None)
-    return {'enabled': row['是否计入提成范围'] == '是', 'note': '来源：2025年奖金方案（全BD、全季度）'} if row else {}
+    return {'enabled': row['是否计入提成范围'] == '是', 'note': '来源：2025年奖金方案（全BD、全季度）'} if row and row.get('是否计入提成范围') in ('是', '否') else {}
+
+
+def target_member_active(settings, owner, quarter):
+    events = setting_payload(settings, TARGETS_KEY).get('memberships', {}).get(owner, {})
+    prior = [q for q in events if q <= quarter]
+    return events[max(prior)] if prior else True
 
 
 def source_target(settings, owner, quarter):
@@ -116,5 +124,7 @@ def source_target(settings, owner, quarter):
 
 
 def target_entry(settings, owner, quarter):
+    if not target_member_active(settings, owner, quarter):
+        return None
     data = setting_payload(settings, TARGETS_KEY)
     return next((r for r in data.get('rows', []) if r['BD姓名'] == owner and r['季度'] == quarter), None)

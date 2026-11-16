@@ -539,7 +539,7 @@ def test_sales_source_samples_are_scoped_and_do_not_change_orders(business_accou
         for kind in sales_workspace.SOURCE_TITLES:
             response = manager.get('/api/sales-workspace/sources/' + kind)
             assert response.status_code == 200 and response.json()['read_only'] is True
-            assert response.json()['sample'] is (kind != 'constants')
+            assert response.json()['sample'] is (kind not in ('constants','orders'))
         assert len(manager.get('/api/sales-workspace/sources/constants').json()['rows']) == 9
         assert manager.get('/api/sales-workspace/sources/unknown').status_code == 404
         after = manager.get('/api/commission-data?category=sales&owner=何卫').json()
@@ -971,7 +971,8 @@ def test_v005_annual_plan_edit_new_service_year_isolation_and_inheritance(busine
         initial=manager.get('/api/bonus-config/plans').json()
         assert initial['year']==2025 and initial['exists'] and len(initial['rows'])==2
         empty=manager.get('/api/bonus-config/plans?year=2026').json()
-        assert not empty['exists'] and empty['rows']==[] and empty['can_copy']
+        assert not empty['exists'] and empty['can_copy']
+        assert empty['rows']==[]
         assert manager.post('/api/bonus-config/plans/2027/inherit',json={'version':0}).status_code==409
         inherited=manager.post('/api/bonus-config/plans/2026/inherit',json={'version':0})
         assert inherited.status_code==200,inherited.text
@@ -1252,6 +1253,156 @@ def test_v006_rejects_stale_calculations_and_unsafe_archives(v006_accounts):
         assert result.status_code==409,result.text
         assert manager.get('/api/bonus-import/latest').json()['consumed'] is False
 
+
+
+def test_target_roster_changes_propagate_forward_without_reviving_departures(business_accounts,v005_sources):
+    from backend.app import SystemSetting
+    from backend.sales_formulas import effective_period,setting_key
+    from backend.bonus_config import all_settings
+    with client_as() as manager:
+        version=manager.get('/api/bonus-config/targets?quarter=2026Q3').json()['version']
+        for q in ['2026Q4','2027Q1']:
+            r=manager.post(f'/api/bonus-config/targets/{q}/inherit',json={'version':version})
+            assert r.status_code==200,r.text
+            version=r.json()['version']
+        with Session(engine) as db:
+            db.add(SystemSetting(key=setting_key('period','何卫','2027Q1'),value=json.dumps({'target':'99999'}),version=1))
+            db.commit()
+        deleted=manager.request('DELETE','/api/bonus-config/targets/2026Q4/members',json={'owner':'何卫','version':version})
+        assert deleted.status_code==200,deleted.text
+        assert '何卫' not in {r['BD姓名'] for r in deleted.json()['rows']}
+        assert '何卫' in {r['BD姓名'] for r in manager.get('/api/bonus-config/targets?quarter=2026Q3').json()['rows']}
+        assert '何卫' not in {r['BD姓名'] for r in manager.get('/api/bonus-config/targets?quarter=2027Q1').json()['rows']}
+        with Session(engine) as db:
+            assert effective_period(all_settings(db),'何卫','2027Q1')['target'] is None
+            assert db.scalar(select(User).where(User.username=='何卫')).active
+        added=manager.post('/api/bonus-config/targets/2026Q4/members',json={'owner':'新同事','version':deleted.json()['version']})
+        assert added.status_code==200,added.text
+        for q in ['2026Q4','2027Q1']:
+            target=next(r for r in manager.get('/api/bonus-config/targets',params={'quarter':q}).json()['rows'] if r['BD姓名']=='新同事')
+            assert target['直接营收目标'] is None
+        assert '新同事' not in {r['BD姓名'] for r in manager.get('/api/bonus-config/targets?quarter=2026Q3').json()['rows']}
+        stale=manager.post('/api/bonus-config/targets/2026Q4/members',json={'owner':'冲突人员','version':version})
+        assert stale.status_code==409
+        inherited=manager.post('/api/bonus-config/targets/2027Q2/inherit',json={'version':added.json()['version']})
+        assert inherited.status_code==200,inherited.text
+        names={r['BD姓名'] for r in inherited.json()['rows']}
+        assert '何卫' not in names and '新同事' in names and '冲突人员' not in names
+        rejoin=manager.post('/api/bonus-config/targets/2027Q1/members',json={'owner':'何卫','version':inherited.json()['version']})
+        assert rejoin.status_code==200,rejoin.text
+        assert '何卫' not in {r['BD姓名'] for r in manager.get('/api/bonus-config/targets?quarter=2026Q4').json()['rows']}
+        assert '何卫' in {r['BD姓名'] for r in manager.get('/api/bonus-config/targets?quarter=2027Q2').json()['rows']}
+    with client_as('何卫','Test-only-password!') as bd:
+        assert bd.post('/api/bonus-config/targets/2026Q4/members',json={'owner':'其他人','version':0}).status_code==403
+        assert bd.request('DELETE','/api/bonus-config/targets/2026Q4/members',json={'owner':'何卫','version':0}).status_code==403
+
+
+def test_empty_quarter_can_add_member_without_previous_quarter(business_accounts,v005_sources):
+    with client_as() as manager:
+        current=manager.get('/api/bonus-config/targets?quarter=2028Q1').json()
+        added=manager.post('/api/bonus-config/targets/2028Q1/members',json={'owner':'未来员工','version':current['version']})
+        assert added.status_code==200,added.text
+        removed=manager.request('DELETE','/api/bonus-config/targets/2028Q1/members',json={'owner':'未来员工','version':added.json()['version']})
+        assert removed.status_code==200 and removed.json()['rows']==[] and removed.json()['exists']
+        inherited=manager.post('/api/bonus-config/targets/2028Q2/inherit',json={'version':removed.json()['version']})
+        assert inherited.status_code==200 and '未来员工' not in {r['BD姓名'] for r in inherited.json()['rows']}
+
+
+def test_source_services_are_not_added_to_plans_and_manual_blank_is_preserved(business_accounts,v005_sources,monkeypatch):
+    from backend import order_source
+    from backend.bonus_rules import shared_service_rule
+    from backend.bonus_config import all_settings
+    records=[{'row_id':1,'values':{'BD姓名':'何卫','付费时间':'2026-11-01 12:00:00','付费项目':'新接入水电表','订单号':'NEW-1'}},
+             {'row_id':2,'values':{'BD姓名':'周政','付费时间':'2027-01-01 12:00:00','付费项目':'明年服务','订单号':'NEW-2'}}]
+    def source(**kwargs):
+        rows=[r for r in records if kwargs.get('owner') is None or r['values']['BD姓名']==kwargs['owner']]
+        return {'rows':rows,'total':len(rows),'source_name':'测试后台'}
+    monkeypatch.setattr(order_source,'read_orders',source)
+    with client_as() as manager:
+        initial=manager.get('/api/bonus-config/plans?year=2026').json()
+        assert initial['rows']==[]
+        payload={'version':initial['version'],'rows':[{'service':'新接入水电表','enabled':None}]}
+        saved=manager.put('/api/bonus-config/plans/2026',json=payload)
+        assert saved.status_code==200 and saved.json()['rows'][0]['是否计入提成范围'] is None
+        with Session(engine) as db:
+            assert shared_service_rule(all_settings(db),'新接入水电表',year=2026)['enabled'] is None
+        for value in [False,True]:
+            payload={'version':saved.json()['version'],'rows':[{'service':'新接入水电表','enabled':value}]}
+            saved=manager.put('/api/bonus-config/plans/2026',json=payload)
+            assert saved.status_code==200
+            with Session(engine) as db:
+                assert shared_service_rule(all_settings(db),'新接入水电表',year=2026)['enabled'] is value
+        records.append({'row_id':3,'values':{'BD姓名':'何卫','付费时间':'2026-11-02','付费项目':'再次新增服务','订单号':'NEW-3'}})
+        refreshed=manager.get('/api/bonus-config/plans?year=2026').json()
+        assert refreshed['version']==saved.json()['version']
+        assert '再次新增服务' not in {r['所购服务'] for r in refreshed['rows']}
+        assert '明年服务' not in {r['所购服务'] for r in refreshed['rows']}
+    with client_as('何卫','Test-only-password!') as bd:
+        assert bd.get('/api/bonus-config/plans?year=2027').json()['rows']==[]
+        assert bd.put('/api/bonus-config/plans/2026',json=payload).status_code==403
+
+
+def test_single_order_eligibility_override_recalculates_and_preserves_other_fields(business_accounts,v005_sources):
+    with client_as() as manager:
+        cats=manager.get('/api/bd-categories').json()
+        manager.put('/api/bd-categories',json={'mapping':{**cats['mapping'],'何卫':'sales'},'version':cats['version']})
+        assert manager.post('/api/bonus-config/plans/2026/inherit',json={'version':0}).status_code==200
+        target=manager.get('/api/bonus-config/targets?quarter=2026Q4').json()
+        assert manager.post('/api/bonus-config/targets/2026Q4/inherit',json={'version':target['version']}).status_code==200
+        constants=manager.get('/api/bonus-config/constants').json()
+        assert manager.put('/api/bonus-config/constants',json={'version':constants['version'],'parameters':{'threshold':'0'}}).status_code==200
+        def rows():
+            return manager.get('/api/commission-data?category=sales&owner=何卫&search=收费系统户数').json()['rows']
+        row=rows()[0]
+        assert row['enabled'] is True and Decimal(row['bonus'])>0
+        assert manager.put('/api/commission-data/confirmation',json={'record_key':row['record_key'],'version':row['version'],'note':'原有依据','is_paid':True,'is_refunded':False}).status_code==200
+        row=rows()[0]
+        assert manager.put('/api/commission-data/note',json={'record_key':row['record_key'],'version':row['version'],'note':'保留自定义备注'}).status_code==200
+        row=rows()[0]; original_bonus=row['bonus']; original_basis=row['bonus_basis']
+        body={'record_key':row['record_key'],'version':row['version'],'enabled':False}
+        assert manager.put('/api/commission-data/eligibility',json=body).status_code==200
+        changed=rows()[0]
+        assert changed['enabled'] is False and Decimal(changed['bonus'])==0
+        assert changed['bonus_basis']==original_basis and changed['is_paid'] is True and changed['is_refunded'] is False
+        assert changed['note']=='保留自定义备注\n人工修改计提资格：是 → 否' and '计提资格' in changed['calculation']['overrides']
+        assert rows()[1]['enabled'] is True
+        assert manager.put('/api/commission-data/eligibility',json=body).status_code==409
+        export=manager.get('/api/bonus-export/sales',params={'owner':'何卫','search':row['order_no']})
+        assert export.status_code==200
+        _,sheets=workbook_sheets(export.content)
+        ns='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+        assert sheets[0][1][7].find('.//'+ns+'t').text=='否'
+        assert Decimal(sheets[0][1][15].find(ns+'v').text)==0
+        assert manager.put('/api/commission-data/eligibility',json={**body,'version':changed['version'],'enabled':True}).status_code==200
+        changed=rows()[0]
+        assert changed['enabled'] is True and changed['bonus']==original_bonus
+        assert 'enabled' not in changed['confirmation']
+        assert changed['note']=='保留自定义备注'
+        assert '计提资格' not in changed['calculation']['overrides']
+        assert manager.put('/api/commission-data/eligibility',json={**body,'version':changed['version'],'enabled':None}).status_code==200
+        restored=rows()[0]
+        assert 'enabled' not in restored['confirmation'] and restored['bonus']==original_bonus
+        assert '计提资格' not in restored['calculation']['overrides']
+        for invalid in [{'enabled':'否'},{'bonus':1}]:
+            assert manager.put('/api/commission-data/eligibility',json={**body,'version':restored['version'],**invalid}).status_code==422
+        assert manager.put('/api/commission-data/eligibility',json={**body,'record_key':'commission_record_'+'0'*40}).status_code==409
+    with client_as('何卫','Test-only-password!') as bd:
+        assert bd.put('/api/commission-data/eligibility',json=body).status_code==403
+
+
+def test_actual_order_source_pages_and_enforces_bd_scope(business_accounts):
+    with client_as() as manager:
+        first=manager.get('/api/sales-workspace/sources/orders?page=1&page_size=5').json()
+        second=manager.get('/api/sales-workspace/sources/orders?page=2&page_size=5').json()
+        assert first['active'] and not first['sample'] and first['total']==3960
+        assert len(first['rows'])==5 and len(second['rows'])==5
+        assert not {r['row_id'] for r in first['rows']} & {r['row_id'] for r in second['rows']}
+        assert first['rows'][0]['订单号'].startswith('TEST-')
+        assert manager.get('/api/sales-workspace/sources/orders?page_size=201').status_code==422
+    with client_as('何卫','Test-only-password!') as bd:
+        result=bd.get('/api/sales-workspace/sources/orders?page_size=200').json()
+        assert result['total']==307 and {r['BD姓名'] for r in result['rows']}=={'何卫'}
+        assert bd.get('/api/sales-workspace/sources/orders?search=周政').json()['total']==0
 
 
 def test_missing_plan_and_missing_service_have_distinct_actionable_diagnostics(business_accounts,v005_sources):

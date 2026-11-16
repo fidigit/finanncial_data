@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, App, Button, Empty, Input, InputNumber, Select, Space, Spin, Table, Tag } from 'antd';
-import { PlusOutlined, SaveOutlined } from '@ant-design/icons';
+import { Alert, App, AutoComplete, Button, Empty, Input, InputNumber, Modal, Select, Space, Spin, Table, Tag, Tooltip } from 'antd';
+import { DeleteOutlined, PlusOutlined, SaveOutlined } from '@ant-design/icons';
 import { api } from './api';
 import { RULE_PARAMETERS } from './SalesFixedRuleContent';
 
 type TargetRow = { BD姓名:string; 季度:string; 直接营收目标:string|number|null };
-type ServiceRow = { 所购服务:string; 是否计入提成范围:string; added?:boolean; localKey?:string };
+type ServiceRow = { 所购服务:string; 是否计入提成范围:string|null; added?:boolean; localKey?:string };
 type ConfigData = {
   quarter?:string; quarters?:string[]; year?:number; years?:number[]; missing_years?:number[]; missing_services?:{service:string;count:number}[];
   rows?: (TargetRow|ServiceRow)[]; parameters?:Record<string,string|number|boolean|null>;
-  version:number; can_edit:boolean; exists?:boolean; can_copy?:boolean; previous_quarter?:string; previous_year?:number;
+  version:number; can_edit:boolean; exists?:boolean; can_copy?:boolean; previous_quarter?:string; previous_year?:number; available_names?:string[];
 };
 export type EditorKind = 'targets'|'services'|'constants';
 const endpoint:Record<EditorKind,string>={targets:'targets',services:'plans',constants:'constants'};
@@ -20,6 +20,7 @@ const constantFields=[...(RULE_PARAMETERS.S||[]),...(RULE_PARAMETERS.X||[])];
 export default function SalesSourceEditor({kind,onDirtyChange,onBusyChange}:{kind:EditorKind;onDirtyChange:(dirty:boolean)=>void;onBusyChange:(busy:boolean)=>void}){
   const {message,modal}=App.useApp();
   const [selection,setSelection]=useState<string|number>(),[data,setData]=useState<ConfigData>();
+  const [addingMember,setAddingMember]=useState(false),[memberName,setMemberName]=useState('');
   const [rows,setRows]=useState<(TargetRow|ServiceRow)[]>([]),[parameters,setParameters]=useState<Record<string,number|null>>({});
   const [loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[dirty,setDirty]=useState(false),[revision,setRevision]=useState(0);
   const sequence=useRef(0),alive=useRef(true),ownSave=useRef(false);
@@ -61,7 +62,7 @@ export default function SalesSourceEditor({kind,onDirtyChange,onBusyChange}:{kin
     if(!inherit){
       if(kind==='targets')payload.rows=(rows as TargetRow[]).map(r=>({owner:r.BD姓名,target:r.直接营收目标}));
       if(kind==='services'){
-        const entries=(rows as ServiceRow[]).map(r=>({service:r.所购服务.trim(),enabled:r.是否计入提成范围==='是'}));
+        const entries=(rows as ServiceRow[]).map(r=>({service:r.所购服务.trim(),enabled:r.是否计入提成范围==null?null:r.是否计入提成范围==='是'}));
         if(entries.some(r=>!r.service)||new Set(entries.map(r=>r.service)).size!==entries.length){setError('请填写奖金来源名称，且名称不能重复。');return;}
         payload.rows=entries;
       }
@@ -79,6 +80,22 @@ export default function SalesSourceEditor({kind,onDirtyChange,onBusyChange}:{kin
       message.success(inherit?`${selected}${kind==='targets'?'目标':'年方案'}已沿袭，已保存并用于计算`:'已保存并同步计算与齿轮参数');
     }catch(e){if(alive.current)setError((e as Error).message);}finally{if(alive.current)setBusy(false);}
   }
+  async function changeMember(owner:string,adding:boolean){
+    if(!data||!editable)return;
+    if(dirty){message.warning('请先保存当前目标修改，再增减人员。');return;}
+    if(!owner.trim()){message.warning('请填写BD姓名');return;}
+    setBusy(true);setError('');
+    try{
+      const next=await api<ConfigData>(`/bonus-config/targets/${selected}/members`,{method:adding?'POST':'DELETE',body:JSON.stringify({owner:owner.trim(),version:data.version})});
+      if(!alive.current)return;
+      accept(next);setAddingMember(false);setMemberName('');
+      ownSave.current=true;window.dispatchEvent(new Event('bonus-rules-changed'));ownSave.current=false;
+      message.success(`${owner}已从${selected}起${adding?'加入':'移出'}目标名单，历史季度保留`);
+    }catch(e){if(alive.current)setError((e as Error).message);}finally{if(alive.current)setBusy(false);}
+  }
+  function removeMember(name:string){
+    modal.confirm({title:`从${selected}起移除${name}？`,content:'将删除本季度及已建立的后续季度营收目标，更早季度保留。账号和历史账单不受影响。',okText:'删除当前及后续目标',okButtonProps:{danger:true},cancelText:'取消',onOk:()=>changeMember(name,false)});
+  }
   const empty=kind!=='constants'&&!rows.length;
   return <div className="bonus-source-editor" aria-label={kind==='targets'?'季度目标编辑器':kind==='services'?'年度奖金方案编辑器':'公共常数编辑器'}>
     <div className="bonus-config-toolbar"><Space wrap>
@@ -93,21 +110,21 @@ export default function SalesSourceEditor({kind,onDirtyChange,onBusyChange}:{kin
     {error&&<Alert type="error" showIcon title={error}/>}
     {kind==='services'&&!!data?.missing_years?.length&&<Alert type="warning" showIcon title={`订单涉及的${data.missing_years.map(y=>`${y}年`).join('、')}尚未建立奖金方案`} description="表格按订单付款年份读取，其他年份的‘是’不会应用到这些订单。请选择缺失年份并沿袭上一年方案。" action={<Button onClick={()=>switchSelection(data.missing_years![0])} disabled={busy||loading}>前往{data.missing_years[0]}年</Button>}/>}
 
-    {kind==='services'&&data?.exists&&!!data.missing_services?.length&&<Alert type="warning" showIcon title={`${data.year}年有${data.missing_services.length}个订单服务未配置，相关订单仍待设置规则`} description={<div>{data.missing_services.map(item=><Tag key={item.service}>{item.service}（{item.count}条）</Tag>)}<p>请在下方新增奖金来源并明确设置是或否；系统不会猜测名称相近的服务。</p></div>}/>}
     <Spin spinning={loading}>
-      {empty?<div className="bonus-config-empty"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`${selected||''}${kind==='targets'?'尚无营收目标':'年尚无奖金方案'}`}/>
-        {data?.can_edit&&<Button className="bonus-inherit-button" aria-label={kind==='targets'?'沿袭上一季度目标':'沿袭上一年奖金方案'} icon={<PlusOutlined/>} disabled={!editable||!data.can_copy} loading={busy} onClick={()=>submit(true)}>{kind==='targets'?`沿袭${data.previous_quarter}全部BD目标`:`沿袭${data.previous_year}年奖金方案`}</Button>}
-        {data&&!data.can_copy&&<span className="subtext">请先建立{kind==='targets'?data.previous_quarter:`${data.previous_year}年`}的配置</span>}
+      {empty?<div className="bonus-config-empty"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`${selected||''}${kind==='targets'?'暂无BD营收目标':'年尚无奖金方案'}`}/>
+        {data?.can_edit&&!data.exists&&<Button className="bonus-inherit-button" aria-label={kind==='targets'?'沿袭上一季度目标':'沿袭上一年奖金方案'} icon={<PlusOutlined/>} disabled={!editable||!data.can_copy} loading={busy} onClick={()=>submit(true)}>{kind==='targets'?`沿袭${data.previous_quarter}全部BD目标`:`沿袭${data.previous_year}年奖金方案`}</Button>}
+        {data&&!data.can_copy&&!data.exists&&<span className="subtext">{kind==='targets'?'可直接新增BD，或先建立上一季度再沿袭。':`请先建立${data.previous_year}年的配置`}</span>}
       </div>:kind==='targets'?<Table<TargetRow> size="small" bordered rowKey="BD姓名" pagination={false} dataSource={rows as TargetRow[]} columns={[
-        {title:'BD姓名',dataIndex:'BD姓名',align:'center'}, {title:'季度',dataIndex:'季度',align:'center'},
+        {title:'BD姓名',dataIndex:'BD姓名',align:'center',render:(name:string)=><span className="target-member-name"><span>{name}</span>{data?.can_edit&&<Tooltip title="删除本季度及后续目标"><Button className="target-member-delete" type="text" danger size="small" aria-label={`删除${name}的当前及后续目标`} icon={<DeleteOutlined/>} disabled={!editable||dirty} onClick={()=>removeMember(name)}/></Tooltip>}</span>}, {title:'季度',dataIndex:'季度',align:'center'},
         {title:'直接营收目标（元）',align:'center',render:(_,r)=><InputNumber aria-label={`${r.BD姓名}直接营收目标`} value={r.直接营收目标==null?null:Number(r.直接营收目标)} min={0.01} max={1000000000000} precision={2} disabled={!editable} placeholder="待填写" onChange={value=>{setRows(previous=>(previous as TargetRow[]).map(item=>item.BD姓名===r.BD姓名?{...item,直接营收目标:value}:item));changed();}}/>},
       ]}/>:kind==='services'?<>
+        {!data?.exists&&data?.can_copy&&data.can_edit&&<Button icon={<PlusOutlined/>} disabled={!editable||dirty} onClick={()=>submit(true)}>沿袭{data.previous_year}年奖金方案</Button>}
         <p className="subtext">按订单付款年份匹配本年度方案；团队VIP沿用独立金额下限公式。全部来源在本页展示。</p>
         <Table<ServiceRow> size="small" bordered pagination={false} rowKey={r=>r.localKey||r.所购服务} dataSource={rows as ServiceRow[]} columns={[
           {title:'奖金来源／所购服务',render:(_,r)=>r.added?<Input aria-label="新增奖金来源名称" maxLength={200} value={r.所购服务} disabled={!editable} placeholder="例如：马克智能水电表" onChange={e=>{setRows(previous=>(previous as ServiceRow[]).map(item=>item.localKey===r.localKey?{...item,所购服务:e.target.value}:item));changed();}}/>:r.所购服务},
-          {title:'是否计入提成范围',width:220,align:'center',render:(_,r)=><Select aria-label={`${r.所购服务||'新增来源'}是否计入提成范围`} style={{width:110}} value={r.是否计入提成范围} disabled={!editable} options={[{value:'是',label:'是'},{value:'否',label:'否'}]} onChange={value=>{setRows(previous=>(previous as ServiceRow[]).map(item=>(r.localKey?item.localKey===r.localKey:item.所购服务===r.所购服务)?{...item,是否计入提成范围:value}:item));changed();}}/>},
+          {title:'是否计入提成范围',width:220,align:'center',render:(_,r)=><Select aria-label={`${r.所购服务||'新增来源'}是否计入提成范围`} style={{width:130}} value={r.是否计入提成范围??undefined} placeholder="请选择" allowClear disabled={!editable} options={[{value:'是',label:'是'},{value:'否',label:'否'}]} onChange={value=>{setRows(previous=>(previous as ServiceRow[]).map(item=>(r.localKey?item.localKey===r.localKey:item.所购服务===r.所购服务)?{...item,是否计入提成范围:value??null}:item));changed();}}/>},
         ]}/>
-        {data?.can_edit&&<Button block type="dashed" aria-label="新增奖金来源" icon={<PlusOutlined/>} className="bonus-add-service" disabled={!editable} onClick={()=>{setRows(previous=>[...previous,{所购服务:'',是否计入提成范围:'是',added:true,localKey:crypto.randomUUID()}]);changed();}}>新增奖金来源</Button>}
+        {data?.can_edit&&<Button block type="dashed" aria-label="新增奖金来源" icon={<PlusOutlined/>} className="bonus-add-service" disabled={!editable} onClick={()=>{setRows(previous=>[...previous,{所购服务:'',是否计入提成范围:null,added:true,localKey:crypto.randomUUID()}]);changed();}}>新增奖金来源</Button>}
       </>:<>
         <p className="subtext">与蓝色、紫色齿轮共用同一份参数；保存后适用于全部BD和全部季度。</p>
         <Table size="small" bordered rowKey="key" pagination={false} dataSource={constantFields} columns={[
@@ -116,6 +133,11 @@ export default function SalesSourceEditor({kind,onDirtyChange,onBusyChange}:{kin
           {title:'同步位置',width:200,render:(_,field)=>field.key==='vip_minimum'?'⑧ 是否计发提成':'⑮ 适用提点'},
         ]}/>
       </>}
+      {kind==='targets'&&data?.can_edit&&<Button type="dashed" icon={<PlusOutlined/>} className="bonus-add-member" aria-label="新增BD目标人员" disabled={!editable||dirty} onClick={()=>{setMemberName('');setAddingMember(true);}}>新增BD</Button>}
     </Spin>
+    <Modal title={`新增BD · ${selected||''}`} open={addingMember} onCancel={()=>!busy&&setAddingMember(false)} confirmLoading={busy} okText="加入当前及后续季度" cancelText="取消" onOk={()=>changeMember(memberName,true)}>
+      <p>加入本季度及已建立的后续季度，目标金额留空待填写，更早季度保留。</p>
+      <AutoComplete aria-label="新增BD姓名" style={{width:'100%'}} value={memberName} onChange={setMemberName} options={(data?.available_names||[]).filter(name=>!(rows as TargetRow[]).some(r=>r.BD姓名===name)).map(value=>({value}))} filterOption={(input,option)=>String(option?.value||'').includes(input)}><Input placeholder="选择或输入BD姓名" maxLength={100}/></AutoComplete>
+    </Modal>
   </div>;
 }

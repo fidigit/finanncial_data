@@ -1,6 +1,6 @@
 """Sales source previews. Historical workbook samples never overwrite live orders."""
 import json
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from backend.bonus_rules import PLAN_KEY, TARGETS_KEY, GLOBAL_KEY, setting_payload, shared_service_rule, YEAR_PLAN_PREFIX
@@ -24,9 +24,23 @@ CONSTANTS = [
 ]
 
 @app.get('/api/sales-workspace/sources/{kind}')
-def source_preview(kind: str, user=Depends(current_user), db: Session = Depends(database)):
+def source_preview(kind: str, user=Depends(current_user), db: Session = Depends(database),
+                   page: int = Query(default=1,ge=1), page_size: int = Query(default=20,ge=1,le=200), search: str = ''):
     if kind not in SOURCE_TITLES:
         raise HTTPException(404, '输入源头不存在')
+    if kind == 'orders':
+        from backend.order_source import read_orders
+        result=read_orders(owner=user.name.strip() if user.role=='bd' else None,page=page,page_size=page_size,search=search)
+        fields={'BD姓名':'BD姓名','季度':'季度','订单号':'订单号','付款公司':'付款户名',
+                '付款时间':'付费时间','所购服务':'付费项目','首购/续费':'首购/续费','订单金额':'订单金额'}
+        rows=[]
+        for record in result['rows']:
+            values=record['values']
+            rows.append({'row_id':record['row_id'],**{label:values.get(source,'') for label,source in fields.items()},
+                         '付款公司':values.get('付款户名') or values.get('业务id信息','')})
+        return {'kind':kind,'title':SOURCE_TITLES[kind],'sheet':result['source_name'], 'columns':list(fields),
+                'rows':rows,'total':result['total'],'page':page,'page_size':page_size,'read_only':True,
+                'sample':False,'active':True,'note':'读取当前后台订单数据，订单号重复的记录按来源行保留。'}
     settings = {s.key:s for s in db.scalars(select(SystemSetting))}
     active = kind == 'constants' or (PLAN_KEY if kind == 'services' else TARGETS_KEY if kind == 'targets' else '') in settings
     if kind == 'constants':

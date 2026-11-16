@@ -31,6 +31,7 @@ export default function CommissionDataTable({ category }: { category: 'sales' | 
   const [error, setError] = useState('');
   const [record, setRecord] = useState<RecordRow | null>(null);
   const [saving, setSaving] = useState(false);
+  const [eligibilitySaving, setEligibilitySaving] = useState<string|null>(null);
   const [exporting, setExporting] = useState(false);
   const [rowForm] = Form.useForm();
   const sequence = useRef(0);
@@ -49,13 +50,28 @@ export default function CommissionDataTable({ category }: { category: 'sales' | 
     rowForm.setFieldsValue({ note: row.note || '' });
     setRecord(row);
   }
+  async function changeEligibility(row:RecordRow,enabled:boolean){
+    setEligibilitySaving(row.record_key);
+    try{
+      await api('/commission-data/eligibility',{method:'PUT',body:JSON.stringify({record_key:row.record_key,version:row.version,enabled})});
+      message.success('已修改本笔计提资格并重新计算');
+      rulesSaved();
+    }catch(e){message.error((e as Error).message);setRefresh(v=>v+1);}
+    finally{setEligibilitySaving(null);}
+  }
   const textColumn = (title: string, field: keyof RecordRow, width = 120) => ({ title, dataIndex: field, key: field, width, ellipsis: true, render: (value: string) => <Tooltip title={value}>{optionalText(value)}</Tooltip> });
   const columns: ColumnsType<RecordRow> = [
     { title: '订单信息', children: [
       { ...textColumn('季度', 'quarter', 100), fixed: 'start' }, { ...textColumn('BD姓名', 'owner', 110), fixed: 'start' },
       textColumn('付款公司', 'company', 280), textColumn('付款时间', 'paid_date', 160), textColumn('所购服务', 'service', 200), textColumn('首购/续费', 'purchase_type', 105),
       { title: '订单金额', dataIndex: 'order_amount', width: 130, align: 'right', render: value => value ? money(value) : '—' },
-      { title: '是否计发提成', width: 155, render: (_, r) => <Tooltip title={r.rule_note || r.note || '请先设置该服务是否计发提成'}>{flag(r.enabled, r.rule_issue==='missing_year_plan'?'缺年度方案':r.rule_issue==='invalid_payment_year'?'付款时间异常':'待设置规则')}</Tooltip> },
+      { title: '是否计发提成', width: 155, render: (_, r) => {
+        const manual=typeof r.confirmation?.enabled==='boolean';
+        const pending=r.rule_issue==='missing_year_plan'?'缺年度方案':r.rule_issue==='invalid_payment_year'?'付款时间异常':'待设置规则';
+        return <div className="eligibility-cell"><Tooltip title={manual?'本笔订单人工指定':r.rule_note||'按公式判断，可为本笔订单指定是或否'}>
+          {data?.can_edit?<Select size="small" aria-label={`修改${category}第${r.row_id}行是否计发提成`} style={{width:'100%',maxWidth:120}} value={r.enabled==null?undefined:r.enabled?'yes':'no'} placeholder={flag(null,pending)} disabled={loading||eligibilitySaving!==null} loading={eligibilitySaving===r.record_key} onChange={value=>changeEligibility(r,value==='yes')} options={[{value:'yes',label:'是'},{value:'no',label:'否'}]} labelRender={({value})=>flag(value==='yes')} optionRender={({value})=>flag(value==='yes')}/>:flag(r.enabled,pending)}
+        </Tooltip>{manual&&<Tag color="blue">人工</Tag>}</div>;
+      } },
     ] },
     { title: '确认基数', children: [textColumn('共享订单', 'shared_bd', 160), { title: '分摊比例', dataIndex: 'allocation_ratio', width: 125, align: 'right', render: value => value === null ? '待确认' : `${Number(value) * 100}%` }, { title: '奖金计算基数', dataIndex: 'bonus_basis', width: 150, align: 'right', render: amount }] },
     { title: '确认提点（结合首购/续费）', children: [

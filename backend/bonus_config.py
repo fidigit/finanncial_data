@@ -10,7 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app import app, admin, current_user, database, SystemSetting, User, audit, query_reference
-from backend.bonus_rules import TARGETS_KEY, GLOBAL_KEY, YEAR_PLAN_PREFIX, year_plan_key, setting_payload
+from backend.bonus_rules import TARGETS_KEY, GLOBAL_KEY, YEAR_PLAN_PREFIX, year_plan_key, setting_payload, target_member_active
+from backend.order_source import iter_orders
 from backend.bonus_v2 import save_setting
 
 Quarter = Annotated[str, Field(pattern=r'^20\d{2}Q[1-4]$')]
@@ -52,19 +53,35 @@ def target_rows(db, settings):
         old = setting_payload(settings, setting_key('period', name, quarter))
         if old.get('target') is not None and (name,quarter) not in existing:
             rows.append({'BD姓名':name,'季度':quarter,'直接营收目标':old['target']})
-    return rows
+    return [r for r in rows if target_member_active(settings, r['BD姓名'], r['季度'])]
+
+
+def target_quarters(settings, rows):
+    return sorted(set(setting_payload(settings, TARGETS_KEY).get('quarters', [])) | {r['季度'] for r in rows})
+
+
+def save_targets(db, settings, rows, version, *, quarter=None, memberships=None):
+    payload = setting_payload(settings, TARGETS_KEY)
+    quarters = set(target_quarters(settings, rows))
+    if quarter:
+        quarters.add(quarter)
+    save_setting(db, TARGETS_KEY, json.dumps({**payload, 'sheet':'奖金汇总表',
+        'columns':['BD姓名','季度','直接营收目标'], 'rows': rows, 'quarters':sorted(quarters),
+        'memberships': memberships if memberships is not None else payload.get('memberships', {})}, ensure_ascii=False), version)
 
 
 @app.get('/api/bonus-config/targets')
 def get_targets(quarter: Quarter | None = None, user=Depends(current_user), db: Session=Depends(database)):
     settings = all_settings(db)
     rows = target_rows(db, settings)
-    quarters = sorted({r['季度'] for r in rows}, reverse=True)
+    quarters = sorted(target_quarters(settings, rows), reverse=True)
     selected = quarter or (quarters[0] if quarters else f'{date.today().year}Q{(date.today().month-1)//3+1}')
     prior = previous_quarter(selected)
     visible = [r for r in rows if r['季度']==selected and (user.role!='bd' or r['BD姓名'].strip()==user.name.strip())]
     return {'quarter':selected,'quarters':quarters,'rows':visible,'version':settings[TARGETS_KEY].version if TARGETS_KEY in settings else 0,
-            'can_edit':user.role in ('admin','superadmin'),'previous_quarter':prior,'can_copy':any(r['季度']==prior for r in rows)}
+            'can_edit':user.role in ('admin','superadmin'),'previous_quarter':prior,'can_copy':prior in quarters,
+            'exists':selected in quarters,
+            'available_names':known_names(db) if user.role in ('admin','superadmin') else []}
 
 
 class TargetRow(StrictBody):
@@ -80,18 +97,18 @@ class TargetUpdate(VersionBody):
 def put_targets(quarter: Quarter, body:TargetUpdate, user=Depends(admin), db:Session=Depends(database)):
     settings = all_settings(db)
     rows = target_rows(db,settings)
-    if not any(r['季度']==quarter for r in rows):
+    if quarter not in target_quarters(settings, rows):
         raise HTTPException(409,'本季度尚未建立，请先沿袭上一季度目标')
     names = [r.owner.strip() for r in body.rows]
     if len(set(names))!=len(names) or any(r.owner!=r.owner.strip() for r in body.rows):
         raise HTTPException(422,'BD姓名重复或含有首尾空格')
-    allowed = set(known_names(db)) | {r['BD姓名'] for r in rows}
+    allowed = {r['BD姓名'] for r in rows if r['季度']==quarter}
     if set(names)-allowed:
-        raise HTTPException(422,'包含未知BD姓名')
+        raise HTTPException(422,'请通过新增BD入口维护人员')
     if {r['BD姓名'] for r in rows if r['季度']==quarter}-set(names):
         raise HTTPException(422,'不能删除本季度已有BD目标，请保留原有姓名')
     updated = [r for r in rows if r['季度']!=quarter]+[{'BD姓名':r.owner,'季度':quarter,'直接营收目标':str(r.target) if r.target is not None else None} for r in body.rows]
-    save_setting(db,TARGETS_KEY,json.dumps({'sheet':'奖金汇总表','columns':['BD姓名','季度','直接营收目标'],'rows':updated},ensure_ascii=False),body.version)
+    save_targets(db,settings,updated,body.version,quarter=quarter)
     audit(db,user.username,f'修改{quarter}直接营收目标：{len(body.rows)}位BD')
     db.commit()
     return get_targets(quarter,user,db)
@@ -101,16 +118,64 @@ def put_targets(quarter: Quarter, body:TargetUpdate, user=Depends(admin), db:Ses
 def inherit_targets(quarter:Quarter,body:VersionBody,user=Depends(admin),db:Session=Depends(database)):
     settings=all_settings(db)
     rows=target_rows(db,settings)
-    if any(r['季度']==quarter for r in rows):
+    if quarter in target_quarters(settings, rows):
         raise HTTPException(409,'本季度已有目标，不能重复沿袭覆盖')
     prior=previous_quarter(quarter)
     previous={r['BD姓名']:r['直接营收目标'] for r in rows if r['季度']==prior}
-    if not previous:
+    if prior not in target_quarters(settings, rows):
         raise HTTPException(409,f'请先建立{prior}目标')
-    names=sorted(set(known_names(db))|set(previous))
+    members=setting_payload(settings,TARGETS_KEY).get('memberships',{})
+    names=sorted(name for name in set(known_names(db))|set(previous)|set(members) if target_member_active(settings,name,quarter))
     added=[{'BD姓名':name,'季度':quarter,'直接营收目标':previous.get(name)} for name in names]
-    save_setting(db,TARGETS_KEY,json.dumps({'sheet':'奖金汇总表','columns':['BD姓名','季度','直接营收目标'],'rows':rows+added},ensure_ascii=False),body.version)
+    save_targets(db,settings,rows+added,body.version,quarter=quarter)
     audit(db,user.username,f'沿袭{prior}目标至{quarter}：{len(added)}位BD；未有原值的姓名保留待填写')
+    db.commit()
+    return get_targets(quarter,user,db)
+
+
+class TargetMember(VersionBody):
+    owner: str = Field(min_length=1,max_length=100)
+
+
+@app.post('/api/bonus-config/targets/{quarter}/members')
+def add_target_member(quarter:Quarter,body:TargetMember,user=Depends(admin),db:Session=Depends(database)):
+    return change_target_member(quarter,body,user,db,True)
+
+
+@app.delete('/api/bonus-config/targets/{quarter}/members')
+def delete_target_member(quarter:Quarter,body:TargetMember,user=Depends(admin),db:Session=Depends(database)):
+    return change_target_member(quarter,body,user,db,False)
+
+
+def change_target_member(quarter,body,user,db,adding):
+    name=body.owner.strip()
+    if not name or name!=body.owner:
+        raise HTTPException(422,'BD姓名不能为空或含首尾空格')
+    settings=all_settings(db)
+    rows=target_rows(db,settings)
+    present=any(r['季度']==quarter and r['BD姓名']==name for r in rows)
+    if adding and present:
+        raise HTTPException(409,'该季度已存在此BD')
+    if not adding and not present:
+        raise HTTPException(404,'该季度不存在此BD')
+    quarters=set(target_quarters(settings,rows))|{quarter}
+    members=setting_payload(settings,TARGETS_KEY).get('memberships',{})
+    events={q:v for q,v in members.get(name,{}).items() if q<quarter}
+    if adding and not events and not any(r['BD姓名']==name and r['季度']<quarter for r in rows) and quarter>'2000Q1':
+        events['2000Q1']=False
+    events[quarter]=adding
+    members={**members,name:events}
+    if adding:
+        existing={(r['BD姓名'],r['季度']) for r in rows}
+        rows += [{'BD姓名':name,'季度':q,'直接营收目标':None} for q in sorted(quarters)
+                 if q>=quarter and (name,q) not in existing]
+    else:
+        rows=[r for r in rows if r['BD姓名']!=name or r['季度']<quarter]
+    # Preserve empty future quarters after removing their last member.
+    payload=setting_payload(settings,TARGETS_KEY)
+    save_setting(db,TARGETS_KEY,json.dumps({**payload,'sheet':'奖金汇总表',
+        'columns':['BD姓名','季度','直接营收目标'],'rows':rows,'quarters':sorted(quarters),'memberships':members},ensure_ascii=False),body.version)
+    audit(db,user.username,f'{"新增" if adding else "移除"}目标BD：{name}，自{quarter}及后续季度生效')
     db.commit()
     return get_targets(quarter,user,db)
 
@@ -121,11 +186,11 @@ def get_plans(year: Year | None=None,user=Depends(current_user),db:Session=Depen
     years=sorted([int(k[len(YEAR_PLAN_PREFIX):]) for k in settings if k.startswith(YEAR_PLAN_PREFIX)],reverse=True)
     selected=year or (years[0] if years else date.today().year)
     from backend.bonus_rules import order_year
-    records=query_reference(page_size=1000000,allowed_owner=user.name.strip() if user.role=='bd' else None)['rows']
+    records=list(iter_orders(owner=user.name.strip() if user.role=='bd' else None))
     payment_years=sorted({y for r in records if (y:=order_year(r['values'])) is not None})
     missing_years=[y for y in payment_years if year_plan_key(y) not in settings]
     key=year_plan_key(selected)
-    rows=setting_payload(settings,key).get('rows',[])
+    rows=[dict(r) for r in setting_payload(settings,key).get('rows',[])]
     from collections import Counter
     configured={r['所购服务'] for r in rows}
     missing_services=Counter(r['values'].get('付费项目','') for r in records if order_year(r['values'])==selected and r['values'].get('付费项目','') not in configured|{'团队VIP'})
@@ -135,7 +200,7 @@ def get_plans(year: Year | None=None,user=Depends(current_user),db:Session=Depen
 
 class ServiceRow(StrictBody):
     service:str=Field(min_length=1,max_length=200)
-    enabled:StrictBool
+    enabled:StrictBool | None
 
 
 class PlanUpdate(VersionBody):
@@ -146,8 +211,6 @@ class PlanUpdate(VersionBody):
 def put_plan(year:Year,body:PlanUpdate,user=Depends(admin),db:Session=Depends(database)):
     settings=all_settings(db)
     key=year_plan_key(year)
-    if key not in settings:
-        raise HTTPException(409,'本年度尚未建立，请先沿袭上一年方案')
     names=[r.service.strip() for r in body.rows]
     if len(set(names))!=len(names) or any(r.service!=r.service.strip() for r in body.rows):
         raise HTTPException(422,'奖金来源名称重复或含有首尾空格')
@@ -156,7 +219,7 @@ def put_plan(year:Year,body:PlanUpdate,user=Depends(admin),db:Session=Depends(da
     original={r['所购服务'] for r in setting_payload(settings,key).get('rows',[])}
     if original-set(names):
         raise HTTPException(422,'不能删除已有奖金来源，可将是否计入提成范围设为否')
-    rows=[{'所购服务':r.service,'是否计入提成范围':'是' if r.enabled else '否'} for r in body.rows]
+    rows=[{'所购服务':r.service,'是否计入提成范围':None if r.enabled is None else '是' if r.enabled else '否'} for r in body.rows]
     save_setting(db,key,json.dumps({'year':year,'rows':rows},ensure_ascii=False),body.version)
     audit(db,user.username,f'修改{year}年奖金方案：{len(rows)}项来源')
     db.commit()

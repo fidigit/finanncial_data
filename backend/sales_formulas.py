@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from backend.app import (app, database, current_user, admin, SystemSetting, audit,
                          commission_snapshot, project_row, service_key, record_key, with_display_note)
 from backend.bonus_v2 import save_setting
-from backend.bonus_rules import GLOBAL_KEY, shared_service_rule, source_target, target_entry, order_year, YEAR_PLAN_PREFIX
+from backend.bonus_rules import GLOBAL_KEY, shared_service_rule, source_target, target_entry, target_member_active, order_year, YEAR_PLAN_PREFIX
 from backend.sales_expression import SPECS, RULE_PARAMETERS, FormulaError, evaluate_formula, parse_formula
 
 
@@ -115,7 +115,7 @@ def effective_period(settings, owner, quarter):
     # Legacy per-BD constants remain archived but never override shared rules.
     old = stored(settings, setting_key('period', owner, quarter), {})
     entry = target_entry(settings, owner, quarter)
-    target = entry.get('直接营收目标') if entry is not None else old.get('target')
+    target = (entry.get('直接营收目标') if entry is not None else old.get('target')) if target_member_active(settings, owner, quarter) else None
     return {**global_parameters(settings), 'target': target}
 
 

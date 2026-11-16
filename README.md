@@ -1,8 +1,10 @@
-# 商务数据分析网站 v0.0.6
+# 商务数据分析网站 v0.0.7
 
 根据《BD奖金计算与查询系统_最终需求文档_V1.0.md》实现的系统设计与可运行基础版。
 
-发布版本：`v0.0.6`。仓库：[fidigit/finanncial_data](https://github.com/fidigit/finanncial_data)。
+发布版本：`v0.0.7`。仓库：[fidigit/finanncial_data](https://github.com/fidigit/finanncial_data)。
+
+本次更新与原目录升级命令：[v0.0.7发布说明](docs/release-v0.0.7.md)。
 
 跨机器Windows部署及数据保留操作：[v0.0.6跨机器部署与数据迁移](docs/deployment-v0.0.6-transfer.md)。
 
@@ -11,7 +13,7 @@
 - 部署：Docker Compose + MySQL；开发演示可用 SQLite
 - 数据源：MySQL、MaxCompute，预留多表和字段映射。
 
-## v0.0.6 当前功能
+## 当前功能
 
 首页包含业务参考数据、销售奖金、市场奖金和会议奖金。支持BD身份归类与本人数据隔离，销售固定公式及可调全局参数、按季度营收目标、按年份服务方案，备注维护及受控XLSX状态回传。按姓名分Sheet导出，只读列无填充、深灰字体，回传核对当前账号最新版本后只更新发放/退款状态。
 

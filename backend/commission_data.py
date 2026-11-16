@@ -54,7 +54,11 @@ def with_display_note(row):
         parts = [row.get('note') or row.get('rule_note', '')]
         calculation = row.get('calculation') or {}
         parts.extend(calculation.get('problems', []))
-        if calculation.get('overrides'):
-            parts.append('人工覆盖：' + '、'.join(calculation['overrides']))
+        overrides=[name for name in calculation.get('overrides',[]) if name!='计提资格' or not confirmed.get('eligibility_note')]
+        if overrides:
+            parts.append('人工覆盖：' + '、'.join(overrides))
         row['note'] = '\n'.join(str(p) for p in parts if p)
+    eligibility_note=confirmed.get('eligibility_note')
+    if eligibility_note and eligibility_note not in row['note'].split('\n'):
+        row['note']='\n'.join(filter(None,[row['note'],eligibility_note]))
     return row
