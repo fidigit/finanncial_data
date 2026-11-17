@@ -9,7 +9,7 @@ export { SalesHeaderConfiguration } from './SalesFixedHeader';
 export type SalesContext = { owner:string; quarter:string; record_key:string };
 type Source = { kind:string; title:string; sheet:string; columns:string[]; rows:Record<string,unknown>[]; note:string; active?:boolean };
 const sources = [ ['splits','拆分订单表'], ['targets','奖金汇总表'], ['services','奖金方案'], ['orders','C 订单号'], ['segmentation','Z 是否适用分段计算'], ['constants','公共常数'] ];
-const hiddenSources = new Set(['splits', 'constants']);
+const hiddenSources = new Set(['splits', 'constants', 'orders', 'segmentation']);
 
 export function SalesSourceEntries({onlyServices=false}:{onlyServices?:boolean}) {
   const {modal}=App.useApp();

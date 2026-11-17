@@ -75,7 +75,7 @@ export default function CommissionDataTable({ category }: { category: 'sales' | 
     ] },
     { title: '确认基数', children: [textColumn('共享订单', 'shared_bd', 160), { title: '分摊比例', dataIndex: 'allocation_ratio', width: 125, align: 'right', render: value => value === null ? '待确认' : `${Number(value) * 100}%` }, { title: '奖金计算基数', dataIndex: 'bonus_basis', width: 150, align: 'right', render: amount }] },
     { title: '确认提点（结合首购/续费）', children: [
-      { title: '市场渠道', width: 165, render: (_, r) => category === 'sales' ? flag(r.market_recommended ?? null) : r.market_bd || (r.market_pending ? <Tag color="warning">待补市场BD姓名</Tag> : '—') },
+      { title: '市场渠道', width: 165, render: (_, r) => r.market_bd || (category === 'sales' ? flag(r.market_recommended ?? null) : r.market_pending ? <Tag color="warning">待补市场BD姓名</Tag> : '—') },
       textColumn('转介绍', 'referral', 170),
       { title: '累计营收', width: 150, render: (_, r) => category === 'sales' ? amount(r.revenue_total) : <Tooltip title="累计周期、计提范围、重复订单与退款口径确认后计算"><span className="subtext">待确认累计口径</span></Tooltip> },
       { title: '适用提点（分段提点）', width: 185, render: (_, r) => category === 'sales' ? <span>{r.rate_display || '待配置'}</span> : r.confirmed_rate === null ? <span className="subtext">待确认分段提点</span> : <Tooltip title="人工确认提点，尚未执行分段规则引擎">{Number(r.confirmed_rate) * 100}%</Tooltip> },

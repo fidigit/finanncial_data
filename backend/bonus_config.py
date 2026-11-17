@@ -195,7 +195,7 @@ def get_plans(year: Year | None=None,user=Depends(current_user),db:Session=Depen
     configured={r['所购服务'] for r in rows}
     missing_services=Counter(r['values'].get('付费项目','') for r in records if order_year(r['values'])==selected and r['values'].get('付费项目','') not in configured|{'团队VIP'})
     return {'year':selected,'years':years,'rows':rows,'version':settings[key].version if key in settings else 0,
-            'exists':key in settings,'can_edit':user.role in ('admin','superadmin'),'previous_year':selected-1,'can_copy':year_plan_key(selected-1) in settings,'payment_years':payment_years,'missing_years':missing_years,'missing_services':[{'service':s,'count':n} for s,n in missing_services.most_common()]}
+            'exists':key in settings,'can_edit':user.role in ('admin','superadmin'),'previous_year':selected-1,'next_year':selected+1,'can_copy_next':year_plan_key(selected+1) in settings,'can_copy':year_plan_key(selected-1) in settings,'payment_years':payment_years,'missing_years':missing_years,'missing_services':[{'service':s,'count':n} for s,n in missing_services.most_common()]}
 
 
 class ServiceRow(StrictBody):
@@ -227,18 +227,21 @@ def put_plan(year:Year,body:PlanUpdate,user=Depends(admin),db:Session=Depends(da
 
 
 @app.post('/api/bonus-config/plans/{year}/inherit')
-def inherit_plan(year:Year,body:VersionBody,user=Depends(admin),db:Session=Depends(database)):
+def inherit_plan(year:Year,body:VersionBody,user=Depends(admin),db:Session=Depends(database),source_year:Year|None=None):
     settings=all_settings(db)
     key=year_plan_key(year)
     if key in settings:
         raise HTTPException(409,'本年度已有方案，不能重复沿袭覆盖')
     if body.version!=0:
         raise HTTPException(409,'年份版本已变化，请重新加载')
-    previous=setting_payload(settings,year_plan_key(year-1))
+    source=source_year if source_year is not None else year-1
+    if source not in (year-1,year+1):
+        raise HTTPException(422,'请选择相邻年份方案')
+    previous=setting_payload(settings,year_plan_key(source))
     if not previous.get('rows'):
-        raise HTTPException(409,f'请先建立{year-1}年奖金方案')
+        raise HTTPException(409,f'请先建立{source}年奖金方案')
     save_setting(db,key,json.dumps({'year':year,'rows':previous['rows']},ensure_ascii=False),0)
-    audit(db,user.username,f'沿袭{year-1}年奖金方案至{year}年：{len(previous["rows"])}项来源')
+    audit(db,user.username,f'沿袭{source}年奖金方案至{year}年：{len(previous["rows"])}项来源')
     db.commit()
     return get_plans(year,user,db)
 

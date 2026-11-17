@@ -9,7 +9,7 @@ type ServiceRow = { 所购服务:string; 是否计入提成范围:string|null; a
 type ConfigData = {
   quarter?:string; quarters?:string[]; year?:number; years?:number[]; missing_years?:number[]; missing_services?:{service:string;count:number}[];
   rows?: (TargetRow|ServiceRow)[]; parameters?:Record<string,string|number|boolean|null>;
-  version:number; can_edit:boolean; exists?:boolean; can_copy?:boolean; previous_quarter?:string; previous_year?:number; available_names?:string[];
+  version:number; can_edit:boolean; exists?:boolean; can_copy?:boolean; previous_quarter?:string; previous_year?:number; next_year?:number; can_copy_next?:boolean; available_names?:string[];
 };
 export type EditorKind = 'targets'|'services'|'constants';
 const endpoint:Record<EditorKind,string>={targets:'targets',services:'plans',constants:'constants'};
@@ -55,7 +55,7 @@ export default function SalesSourceEditor({kind,onDirtyChange,onBusyChange}:{kin
     if(dirty)modal.confirm({title:'放弃尚未保存的修改？',content:'切换后将读取所选季度或年份的数据。',okText:'放弃并切换',cancelText:'继续编辑',onOk:change});else change();
   }
   function changed(){setDirty(true);setError('');}
-  async function submit(inherit=false){
+  async function submit(inherit=false,sourceYear?:number){
     if(!data||!editable)return;
     setError('');
     let payload:Record<string,unknown>={version:data.version};
@@ -73,7 +73,7 @@ export default function SalesSourceEditor({kind,onDirtyChange,onBusyChange}:{kin
     }
     setBusy(true);
     try{
-      const path=`/bonus-config/${endpoint[kind]}${kind==='constants'?'':`/${selected}`}${inherit?'/inherit':''}`;
+      const path=`/bonus-config/${endpoint[kind]}${kind==='constants'?'':`/${selected}`}${inherit?'/inherit':''}${sourceYear==null?'':`?source_year=${sourceYear}`}`;
       const next=await api<ConfigData>(path,{method:inherit?'POST':'PUT',body:JSON.stringify(payload)});
       if(!alive.current)return;
       accept(next);ownSave.current=true;window.dispatchEvent(new Event('bonus-rules-changed'));ownSave.current=false;
@@ -113,7 +113,8 @@ export default function SalesSourceEditor({kind,onDirtyChange,onBusyChange}:{kin
     <Spin spinning={loading}>
       {empty?<div className="bonus-config-empty"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`${selected||''}${kind==='targets'?'暂无BD营收目标':'年尚无奖金方案'}`}/>
         {data?.can_edit&&!data.exists&&<Button className="bonus-inherit-button" aria-label={kind==='targets'?'沿袭上一季度目标':'沿袭上一年奖金方案'} icon={<PlusOutlined/>} disabled={!editable||!data.can_copy} loading={busy} onClick={()=>submit(true)}>{kind==='targets'?`沿袭${data.previous_quarter}全部BD目标`:`沿袭${data.previous_year}年奖金方案`}</Button>}
-        {data&&!data.can_copy&&!data.exists&&<span className="subtext">{kind==='targets'?'可直接新增BD，或先建立上一季度再沿袭。':`请先建立${data.previous_year}年的配置`}</span>}
+        {kind==='services'&&data?.can_edit&&!data.exists&&data.can_copy_next&&<Button className="bonus-inherit-button" aria-label="沿袭下一年奖金方案" icon={<PlusOutlined/>} disabled={!editable} loading={busy} onClick={()=>submit(true,data.next_year)}>沿袭{data.next_year}年奖金方案</Button>}
+        {data&&!data.can_copy&&!data.can_copy_next&&!data.exists&&<span className="subtext">{kind==='targets'?'可直接新增BD，或先建立上一季度再沿袭。':'请先建立相邻年份的配置'}</span>}
       </div>:kind==='targets'?<Table<TargetRow> size="small" bordered rowKey="BD姓名" pagination={false} dataSource={rows as TargetRow[]} columns={[
         {title:'BD姓名',dataIndex:'BD姓名',align:'center',render:(name:string)=><span className="target-member-name"><span>{name}</span>{data?.can_edit&&<Tooltip title="删除本季度及后续目标"><Button className="target-member-delete" type="text" danger size="small" aria-label={`删除${name}的当前及后续目标`} icon={<DeleteOutlined/>} disabled={!editable||dirty} onClick={()=>removeMember(name)}/></Tooltip>}</span>}, {title:'季度',dataIndex:'季度',align:'center'},
         {title:'直接营收目标（元）',align:'center',render:(_,r)=><InputNumber aria-label={`${r.BD姓名}直接营收目标`} value={r.直接营收目标==null?null:Number(r.直接营收目标)} min={0.01} max={1000000000000} precision={2} disabled={!editable} placeholder="待填写" onChange={value=>{setRows(previous=>(previous as TargetRow[]).map(item=>item.BD姓名===r.BD姓名?{...item,直接营收目标:value}:item));changed();}}/>},

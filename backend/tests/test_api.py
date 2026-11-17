@@ -362,7 +362,9 @@ def test_reference_data_permissions_and_fixture_file():
         assert len(snapshot['columns']) == 18
         assert len(snapshot['rows']) == 20
         assert snapshot['rows'][0]['values']['订单金额'] == '27.43'
-        assert snapshot['rows'][0]['values']['BD姓名'] == ''
+        keys=[(r['values']['季度'],r['values']['BD姓名']) for r in snapshot['rows']]
+        assert keys==sorted(keys,reverse=True)
+        assert snapshot['rows'][0]['values']['BD姓名']==max(fixture_owners)
         assert snapshot['duplicate_order_rows'] == 466
         assert client.get('/api/reference-data?page_size=101').status_code == 422
 
@@ -1092,6 +1094,12 @@ def test_v006_protected_workbook_styles_validation_and_unique_versions(v006_acco
             ns={'m':bonus_transfer.MAIN}
             sheet=ET.fromstring(book.read('xl/worksheets/sheet1.xml'))
             assert sheet.find('m:sheetProtection',ns).get('sheet')=='1'
+            assert sheet.find('m:sheetProtection',ns).get('autoFilter')=='0'
+            assert sheet.find('m:autoFilter',ns).get('ref').startswith('A1:T')
+            assert len(sheet.find('m:sheetData/m:row',ns))==20
+            assert sheet.find('.//m:c[@r="T1"]//m:t',ns).text=='订单id'
+            assert sheet.find('.//m:c[@r="T2"]//m:t',ns).text==row['order_no']
+            assert sheet.find('.//m:c[@r="T2"]',ns).get('s')=='1'
             assert sheet.find('m:sheetViews/m:sheetView/m:pane',ns).get('ySplit')=='1'
             for ref,style in [('A2','1'),('P2','1'),('S2','1'),('Q2','2'),('R2','2'),('Q1','3')]:
                 assert sheet.find('.//m:c[@r="'+ref+'"]',ns).get('s')==style
@@ -1106,6 +1114,8 @@ def test_v006_protected_workbook_styles_validation_and_unique_versions(v006_acco
             xfs=styles.find('m:cellXfs',ns)
             assert xfs[1].find('m:protection',ns).get('locked')=='1' and xfs[2].find('m:protection',ns).get('locked')=='0'
             assert b'BDExport' in book.read('docProps/custom.xml')
+        tampered=patch_xlsx(first.content,{'xl/worksheets/sheet1.xml':{'T2':'changed-order-id'}})
+        assert manager.post('/api/bonus-import/sales/preview',params={'filename':name},content=tampered).status_code==422
         second,_,_=export_one(manager)
         assert second.headers['x-export-version']=='20261112-120000_v2'
         third,_,_=export_one(manager,kind='market',owner='周政')

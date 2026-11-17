@@ -1,10 +1,10 @@
-# 商务数据分析网站 v0.0.7
+# 商务数据分析网站 v0.0.8
 
 根据《BD奖金计算与查询系统_最终需求文档_V1.0.md》实现的系统设计与可运行基础版。
 
-发布版本：`v0.0.7`。仓库：[fidigit/finanncial_data](https://github.com/fidigit/finanncial_data)。
+发布版本：`v0.0.8`。仓库：[fidigit/finanncial_data](https://github.com/fidigit/finanncial_data)。
 
-本次更新与原目录升级命令：[v0.0.7发布说明](docs/release-v0.0.7.md)。
+本次更新：[v0.0.8发布说明](docs/release-v0.0.8.md)。原目录升级命令沿用[v0.0.7部署步骤](docs/release-v0.0.7.md)。
 
 跨机器Windows部署及数据保留操作：[v0.0.6跨机器部署与数据迁移](docs/deployment-v0.0.6-transfer.md)。
 

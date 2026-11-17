@@ -28,7 +28,8 @@ def _read_snapshot(path: str, modified: int, size: int):
 
 
 def query_reference(page=1, page_size=20, search='', quarter='', owner='', project='', ownership='', allowed_owner=None, allowed_owners=None):
-    path = Path(os.getenv('REFERENCE_CSV_PATH', str(DEFAULT_FILE)))
+    imported = DEFAULT_FILE.parent / 'data/mysql-buss-reference.csv'
+    path = Path(os.getenv('REFERENCE_CSV_PATH', str(imported if imported.is_file() else DEFAULT_FILE)))
     if not path.is_file():
         raise HTTPException(404, '参考数据文件尚未配置，请将参考数据.csv放入项目目录或配置 REFERENCE_CSV_PATH')
     try:
@@ -54,6 +55,7 @@ def query_reference(page=1, page_size=20, search='', quarter='', owner='', proje
                 and (not owner or row['values'].get('BD姓名') == owner)
                 and (not project or row['values'].get('付费项目') == project)
                 and (not ownership or row['values'].get('有/无归属BD') == ownership)]
+    filtered.sort(key=lambda row:(row['values'].get('季度',''),row['values'].get('BD姓名','')),reverse=True)
     return {
         'columns': columns, 'rows': filtered[(page-1)*page_size:page*page_size],
         'total': len(filtered), 'source_total': len(rows), 'page': page, 'page_size': page_size,

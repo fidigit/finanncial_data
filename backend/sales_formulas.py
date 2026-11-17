@@ -269,6 +269,11 @@ def sales_response(db, user, page, page_size, search, quarter, owner, expression
     selected = commission_snapshot(db, user, category='sales', page=page, page_size=page_size, search=search, quarter=quarter, owner=owner)
     settings = {s.key: s for s in db.scalars(select(SystemSetting))}
     records, rules = [], {}
+    shared_members=defaultdict(set)
+    for source_row in snapshot['rows']:
+        source_values=source_row['values']
+        if source_values.get('_source_id'):
+            shared_members[(source_values.get('订单号'),source_values.get('付费项目'))].add(source_values.get('BD姓名',''))
     for raw in snapshot['rows']:
         values = raw['values']
         name, period, service = values.get('BD姓名', '').strip(), values.get('季度', ''), values.get('付费项目', '')
@@ -280,8 +285,19 @@ def sales_response(db, user, page, page_size, search, quarter, owner, expression
         if rule:
             rules[service] = rule
         row = project_row(raw, rule, confirmation)
+        variables=stored(settings, setting_key('order', key), OrderInputs().model_dump(mode='json'))
+        if '_source_id' in values:
+            source_amount=decimal(values.get('订单金额'))
+            share=decimal(values.get('_share_amount'))
+            market=values.get('_market_name','').strip()
+            peers=shared_members[(values.get('订单号'),service)]
+            variables={**variables,'split_amount':values.get('_share_amount') or None,
+                       'split_total':str(source_amount) if source_amount is not None and source_amount>0 else None,
+                       'market_name':market,'market_recommended':bool(market)}
+            if source_amount is not None and share is not None and source_amount!=share:
+                variables['shared_names']='、'.join(sorted(set(n for n in peers if n and n!=name))) or '共享订单'
         records.append({'row': row, 'period': period_inputs,
-                        'variables': stored(settings, setting_key('order', key), OrderInputs().model_dump(mode='json')),
+                        'variables': variables,
                         'rule': rule, 'source': ' '.join([values.get('订单来源', ''), values.get('订单来源补充', '')]), 'paid_at': values.get('付费时间', '')})
     # All rule structures are fixed; old free-expression drafts are retained but inactive.
     expressions = {key: spec['default'] for key, spec in SPECS.items()}

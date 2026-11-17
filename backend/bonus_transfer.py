@@ -134,9 +134,9 @@ def read_workbook(content):
                             parsed=Decimal(value.text)
                             if not parsed.is_finite():
                                 raise HTTPException(422,'工作簿数值无效')
-                        if col>19:
+                        if col>20:
                             if parsed!='':
-                                raise HTTPException(422,'不能新增S列之后的数据')
+                                raise HTTPException(422,'不能新增T列之后的数据')
                             continue
                         if (row_number,col) in seen:
                             raise HTTPException(422,'单元格坐标重复')
@@ -146,7 +146,8 @@ def read_workbook(content):
                         if len(seen)>2000000:
                             raise HTTPException(422,'工作簿单元格数量超限')
                 last=max((r for r,c in cells),default=0)
-                matrix=[[cells.get((r,c),'') for c in range(1,20)] for r in range(1,last+1)]
+                width=max(19,max((c for r,c in cells),default=19))
+                matrix=[[cells.get((r,c),'') for c in range(1,width+1)] for r in range(1,last+1)]
                 sheets.append({'name':sheet.get('name',''),'matrix':matrix})
             meta=None
             if 'docProps/custom.xml' in book.namelist():
@@ -181,7 +182,7 @@ STYLES='''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 
 def protected_workbook(rows,meta):
-    source=workbook_bytes(rows,COMMISSION_FIELDS)
+    source=workbook_bytes(rows,COMMISSION_FIELDS+[('order_no','订单id')])
     output=io.BytesIO()
     protection=password_hash(secrets.token_hex(4))
     with zipfile.ZipFile(io.BytesIO(source)) as original,zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as book:
@@ -191,7 +192,7 @@ def protected_workbook(rows,meta):
                 root=parse_xml(raw)
                 data=root.find('m:sheetData',NS)
                 columns=ET.Element('{'+MAIN+'}cols')
-                for minimum,maximum,width,style in [(1,16,18,1),(17,18,15,2),(19,19,48,1)]:
+                for minimum,maximum,width,style in [(1,16,18,1),(17,18,15,2),(19,19,48,1),(20,20,42,1)]:
                     ET.SubElement(columns,'{'+MAIN+'}col',{'min':str(minimum),'max':str(maximum),'width':str(width),'customWidth':'1','style':str(style)})
                 root.insert(list(root).index(data),columns)
                 for r,row in enumerate(data,1):
@@ -202,7 +203,8 @@ def protected_workbook(rows,meta):
                         if cell.get('t')=='n':
                             value=cell.find('m:v',NS)
                             value.text=format(Decimal(value.text),'.15g')
-                ET.SubElement(root,'{'+MAIN+'}sheetProtection',{'sheet':'1','objects':'1','scenarios':'1','formatCells':'1','formatColumns':'1','formatRows':'1','insertColumns':'1','insertRows':'1','deleteColumns':'1','deleteRows':'1','sort':'1','password':protection})
+                ET.SubElement(root,'{'+MAIN+'}sheetProtection',{'sheet':'1','objects':'1','scenarios':'1','formatCells':'1','formatColumns':'1','formatRows':'1','insertColumns':'1','insertRows':'1','deleteColumns':'1','deleteRows':'1','sort':'1','autoFilter':'0','selectLockedCells':'0','selectUnlockedCells':'0','password':protection})
+                ET.SubElement(root,'{'+MAIN+'}autoFilter',{'ref':f'A1:T{len(data)}'})
                 rules=ET.SubElement(root,'{'+MAIN+'}dataValidations',{'count':'1'})
                 validation=ET.SubElement(rules,'{'+MAIN+'}dataValidation',{'type':'list','allowBlank':'0','showErrorMessage':'1','errorStyle':'stop','errorTitle':'状态值不正确','error':'只能选择：是、否、待确认','sqref':f'Q2:R{max(2,len(data))}'})
                 ET.SubElement(validation,'{'+MAIN+'}formula1').text='"是,否,待确认"'
@@ -309,7 +311,7 @@ def validate_import(kind,filename,content,user,db):
             row=current_by_key.get(snapshot['key'])
             if not row or row['version']!=snapshot['version']:
                 raise HTTPException(409,f'{sheet["name"]}第{ordinal}行已变化或超出权限，请重新导出')
-            for col in [*range(16),18]:
+            for col in [*range(16),*range(18,len(snapshot['values']))]:
                 if canonical(values[col])!=snapshot['values'][col]:
                     raise HTTPException(422,f'{sheet["name"]}第{ordinal}行{chr(65+col)}列为只读，不能修改')
                 if current_values[snapshot['key']][col]!=snapshot['values'][col]:
