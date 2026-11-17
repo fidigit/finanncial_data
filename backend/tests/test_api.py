@@ -1400,6 +1400,38 @@ def test_single_order_eligibility_override_recalculates_and_preserves_other_fiel
         assert bd.put('/api/commission-data/eligibility',json=body).status_code==403
 
 
+def test_mysql_sync_config_permissions_success_and_sanitized_failure(business_accounts,monkeypatch,tmp_path):
+    from backend import source_sync
+    import pymysql
+    config=tmp_path/'connection.json'
+    monkeypatch.setenv('BD_MYSQL_CONFIG_PATH',str(config))
+    with client_as() as manager:
+        assert manager.post('/api/source-sync/mysql').status_code==503
+        config.write_text(json.dumps({'host':'10.130.87.26','port':10130,'database':'hiido_report',
+            'username':'sodadev_o','password':'test-only-secret','table':'dws_marki_bill_detail_bd_quarter_buss_da'}),encoding='utf-8')
+        received=[]
+        def success(settings):
+            received.append(settings)
+            return {'date':'2026-11-16','rows':123,'table':'dws_marki_bill_detail_bd_quarter_buss_da'}
+        monkeypatch.setattr(source_sync,'sync_snapshot',success)
+        result=manager.post('/api/source-sync/mysql')
+        assert result.status_code==200 and result.json()['rows']==123
+        assert received[0]['password']=='test-only-secret' and 'test-only-secret' not in result.text
+        source_sync.sync_lock.acquire()
+        try:
+            assert manager.post('/api/source-sync/mysql').status_code==409
+        finally:
+            source_sync.sync_lock.release()
+        def failure(settings):
+            raise pymysql.OperationalError(1045,'access denied test-only-secret')
+        monkeypatch.setattr(source_sync,'sync_snapshot',failure)
+        result=manager.post('/api/source-sync/mysql')
+        assert result.status_code==502 and '1045' in result.text and 'test-only-secret' not in result.text
+        assert not source_sync.sync_lock.locked()
+    with client_as('何卫','Test-only-password!') as bd:
+        assert bd.post('/api/source-sync/mysql').status_code==403
+
+
 def test_actual_order_source_pages_and_enforces_bd_scope(business_accounts):
     with client_as() as manager:
         first=manager.get('/api/sales-workspace/sources/orders?page=1&page_size=5').json()

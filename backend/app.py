@@ -150,7 +150,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title='商务数据分析 API', version='0.0.8', lifespan=lifespan, docs_url='/api/docs' if DEMO else None, redoc_url=None, openapi_url='/api/openapi.json' if DEMO else None)
+app = FastAPI(title='商务数据分析 API', version='0.0.9', lifespan=lifespan, docs_url='/api/docs' if DEMO else None, redoc_url=None, openapi_url='/api/openapi.json' if DEMO else None)
 
 
 @app.middleware('http')
@@ -737,6 +737,7 @@ from backend import sales_formulas
 from backend import sales_workspace
 from backend import bonus_config
 from backend import bonus_transfer
+from backend import source_sync
 
 if (ROOT / 'dist').is_dir():
     app.mount('/', StaticFiles(directory=ROOT / 'dist', html=True), name='frontend')

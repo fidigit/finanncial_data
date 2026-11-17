@@ -30,6 +30,8 @@ def _read_snapshot(path: str, modified: int, size: int):
 def query_reference(page=1, page_size=20, search='', quarter='', owner='', project='', ownership='', allowed_owner=None, allowed_owners=None):
     imported = DEFAULT_FILE.parent / 'data/mysql-buss-reference.csv'
     path = Path(os.getenv('REFERENCE_CSV_PATH', str(imported if imported.is_file() else DEFAULT_FILE)))
+    if imported.is_file() and path.resolve()==DEFAULT_FILE.resolve():
+        path=imported
     if not path.is_file():
         raise HTTPException(404, '参考数据文件尚未配置，请将参考数据.csv放入项目目录或配置 REFERENCE_CSV_PATH')
     try:

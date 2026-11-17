@@ -33,10 +33,20 @@ export default function CommissionDataTable({ category }: { category: 'sales' | 
   const [saving, setSaving] = useState(false);
   const [eligibilitySaving, setEligibilitySaving] = useState<string|null>(null);
   const [exporting, setExporting] = useState(false);
+  const [syncing,setSyncing]=useState(false);
   const [rowForm] = Form.useForm();
   const sequence = useRef(0);
   useEffect(() => { const changed=()=>setRefresh(v=>v+1); window.addEventListener('bonus-rules-changed',changed); return ()=>window.removeEventListener('bonus-rules-changed',changed); }, []);
   const rulesSaved=()=>window.dispatchEvent(new Event('bonus-rules-changed'));
+  async function syncLatest(){
+    setSyncing(true);
+    try{
+      const result=await api<{rows:number;date:string}>('/source-sync/mysql',{method:'POST'});
+      message.success(`已同步${result.date}数据，共${result.rows}条`);
+      rulesSaved();
+    }catch(e){message.error((e as Error).message);}
+    finally{setSyncing(false);}
+  }
   useEffect(() => {
     const current = ++sequence.current;
     setLoading(true); setError('');
@@ -92,7 +102,7 @@ export default function CommissionDataTable({ category }: { category: 'sales' | 
       return { ...column, key: String(column.title), title: <SalesHeaderConfiguration title={String(column.title)} context={data?.rows[0]} onSaved={rulesSaved} /> };
     });
   }
-  return <Card className="reference-data-card commission-data-card" title={category === 'sales' ? '销售奖金表' : '市场奖金表'} extra={<Space><Button loading={exporting} onClick={async () => { setExporting(true); try { await downloadBonus(category, query); } catch(e) { message.error((e as Error).message); } finally { setExporting(false); } }}>导出 XLSX</Button><BonusImport kind={category}/>{category === 'market' && <SalesSourceEntries onlyServices />}<Button icon={<ReloadOutlined />} loading={loading} onClick={() => setRefresh(v => v + 1)}>刷新明细</Button></Space>}>
+  return <Card className="reference-data-card commission-data-card" title={category === 'sales' ? '销售奖金表' : '市场奖金表'} extra={<Space><Button loading={exporting} onClick={async () => { setExporting(true); try { await downloadBonus(category, query); } catch(e) { message.error((e as Error).message); } finally { setExporting(false); } }}>导出 XLSX</Button><BonusImport kind={category}/>{category === 'market' && <SalesSourceEntries onlyServices />}<Button icon={<ReloadOutlined />} loading={syncing} disabled={!data?.can_edit||syncing} onClick={syncLatest}>同步最新数据</Button></Space>}>
     {error && <Alert type="error" showIcon title={error} />}
     <div className="reference-filters"><Input.Search aria-label="搜索提成确认明细" style={{ width: 290 }} placeholder="搜索订单、付款公司或BD" allowClear value={search} onChange={e => { setSearch(e.target.value); if (!e.target.value) setQuery(q => ({ ...q, search: '', page: 1 })); }} onSearch={value => setQuery(q => ({ ...q, search: value, page: 1 }))} />
       <Select aria-label="提成确认季度" allowClear placeholder="全部季度" style={{ width: 140 }} value={query.quarter || undefined} onChange={value => setQuery(q => ({ ...q, quarter: value || '', page: 1 }))} options={(data?.options.quarters || []).map(value => ({ value, label: value }))} />

@@ -3,6 +3,7 @@ import csv
 import getpass
 import json
 import os
+import tempfile
 from pathlib import Path
 import pymysql
 
@@ -16,12 +17,10 @@ FIELDS = {'季度':'pay_quarter','BD姓名':'buss_name','付款户名':'pay_acco
           '_source_id':'id','_share_amount':'sales_share_amt','_market_name':'name'}
 
 
-def main():
-    password = getpass.getpass('MySQL password: ')
-    connection = pymysql.connect(host='10.130.87.26',port=10130,user='sodadev_o',
-        password=password,database='hiido_report',connect_timeout=8,read_timeout=120,
+def sync_snapshot(config, root=ROOT):
+    connection = pymysql.connect(host=config['host'],port=int(config['port']),user=config['username'],
+        password=config['password'],database=config['database'],connect_timeout=8,read_timeout=120,
         cursorclass=pymysql.cursors.DictCursor,autocommit=False)
-    password = None
     try:
         with connection.cursor() as cursor:
             cursor.execute('SELECT MAX(dt) AS dt FROM dws_marki_bill_detail_bd_quarter_buss_da')
@@ -35,18 +34,34 @@ def main():
             raise ValueError('Duplicate source id within latest date; import stopped')
         if not records:
             raise ValueError('Empty source; import stopped')
-        target=ROOT/'data/mysql-buss-reference.csv'
-        temporary=target.with_suffix('.tmp')
-        with temporary.open('w',encoding='utf-8-sig',newline='') as stream:
-            writer=csv.DictWriter(stream,fieldnames=list(FIELDS))
-            writer.writeheader()
-            for row in records:
-                writer.writerow({name:'' if row.get(field) is None else str(row[field]) for name,field in FIELDS.items()})
-        os.replace(temporary,target)
-        (ROOT/'data/mysql-buss-snapshot.json').write_text(json.dumps({'date':str(dt),'rows':len(records),'table':'hiido_report.dws_marki_bill_detail_bd_quarter_buss_da'},ensure_ascii=False),encoding='utf-8')
-        print(f'PASS: {len(records)} rows, dt={dt}. Snapshot saved: {target}')
+        required=set(FIELDS.values())
+        if any(not required.issubset(row) for row in records):
+            raise ValueError('Source columns missing; import stopped')
+        target=root/'data/mysql-buss-reference.csv'
+        target.parent.mkdir(parents=True,exist_ok=True)
+        temporary=None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8-sig',newline='',dir=target.parent,
+                                             prefix='mysql-buss-',suffix='.tmp',delete=False) as stream:
+                temporary=Path(stream.name)
+                writer=csv.DictWriter(stream,fieldnames=list(FIELDS))
+                writer.writeheader()
+                for row in records:
+                    writer.writerow({name:'' if row.get(field) is None else str(row[field]) for name,field in FIELDS.items()})
+            os.replace(temporary,target)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return {'date':str(dt),'rows':len(records),'table':'dws_marki_bill_detail_bd_quarter_buss_da'}
     finally:
         connection.close()
+
+
+def main():
+    password=getpass.getpass('MySQL password: ')
+    result=sync_snapshot({'host':'10.130.87.26','port':10130,'username':'sodadev_o',
+                          'database':'hiido_report','password':password})
+    print(f'PASS: {result["rows"]} rows, dt={result["date"]}.')
 
 
 if __name__=='__main__':

@@ -1,0 +1,8 @@
+{
+  "host": "10.130.87.26",
+  "port": 10130,
+  "database": "hiido_report",
+  "username": "sodadev_o",
+  "password": "",
+  "table": "dws_marki_bill_detail_bd_quarter_buss_da"
+}
