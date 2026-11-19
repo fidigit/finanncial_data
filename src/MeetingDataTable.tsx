@@ -1,10 +1,9 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, App, Button, Card, Form, Input, InputNumber, Modal, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { api, money } from './api';
 import BonusTableView, { downloadBonus } from './BonusTableView';
 import BonusImport from './BonusImport';
-import DataCardToggle from './DataCardToggle';
 
 type Row = {
   id: string; version: number; employee_no: string; owner: string; meeting_date: string;
@@ -28,8 +27,6 @@ const statusTag = (value: boolean | null) => <Tag color={value == null ? 'warnin
 
 export default function MeetingDataTable() {
   const { message } = App.useApp();
-  const [expanded, setExpanded] = useState(false);
-  const contentId = useId();
   const [data, setData] = useState<{ rows: Row[]; total: number; can_edit: boolean; can_edit_note: boolean }>();
   const [query, setQuery] = useState({ page: 1, page_size: 20, search: '' });
   const [refresh, setRefresh] = useState(0);
@@ -44,7 +41,6 @@ export default function MeetingDataTable() {
   const [form] = Form.useForm();
 
   useEffect(() => {
-    if (!expanded) return;
     let active = true;
     setLoading(true);
     api('/meetings?' + new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)])))
@@ -52,7 +48,7 @@ export default function MeetingDataTable() {
       .catch(e => { if (active) { setError(e.message); setData(undefined); } })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [expanded, query, refresh]);
+  }, [query, refresh]);
 
   useEffect(() => {
     const changed = () => setRefresh(v => v + 1);
@@ -95,9 +91,7 @@ export default function MeetingDataTable() {
     </> },
   );
 
-  return <Card title="会议奖金明细" className="reference-data-card"
-    styles={expanded ? undefined : { body: { display: 'none' } }}
-    extra={<Space>{expanded && <>
+  return <Card title="会议奖金明细" className="reference-data-card" extra={<Space>
     {data?.can_edit && <Button type="primary" onClick={() => edit(null)}>新增会议</Button>}
     <Button loading={exporting} onClick={async () => {
       setExporting(true);
@@ -106,10 +100,7 @@ export default function MeetingDataTable() {
     }}>导出 XLSX</Button>
     <BonusImport />
     <Button onClick={() => setRefresh(v => v + 1)}>刷新</Button>
-    </>}
-    <DataCardToggle title="会议奖金明细" contentId={contentId} expanded={expanded} onToggle={() => setExpanded(value => !value)} />
   </Space>}>
-    <div id={contentId} hidden={!expanded}>{expanded && <>
     {error && <Alert type="error" title={error} />}
     <Input.Search style={{ maxWidth: 320, marginBottom: 16 }} placeholder="搜索姓名、会议类型或地点" allowClear onSearch={search => setQuery({ ...query, search, page: 1 })} />
     <BonusTableView<Row> bordered size="small" rowKey="id" loading={loading} columns={columns} dataSource={data?.rows || []} scroll={{ x: 2650, y: 480 }}
@@ -152,6 +143,5 @@ export default function MeetingDataTable() {
         </Form.Item>;
       })}</div></Form>
     </Modal>
-    </>}</div>
   </Card>;
 }

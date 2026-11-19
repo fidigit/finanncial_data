@@ -150,7 +150,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title='商务数据分析 API', version='0.1.2', lifespan=lifespan, docs_url='/api/docs' if DEMO else None, redoc_url=None, openapi_url='/api/openapi.json' if DEMO else None)
+app = FastAPI(title='商务数据分析 API', version='0.1.3', lifespan=lifespan, docs_url='/api/docs' if DEMO else None, redoc_url=None, openapi_url='/api/openapi.json' if DEMO else None)
 
 
 @app.middleware('http')

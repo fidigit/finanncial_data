@@ -1,8 +1,8 @@
-# 商务数据分析网站 v0.1.2
+# 商务数据分析网站 v0.1.3
 
 根据《BD奖金计算与查询系统_最终需求文档_V1.0.md》实现的系统设计与可运行基础版。
 
-当前版本：`v0.1.2`。仓库：[fidigit/finanncial_data](https://github.com/fidigit/finanncial_data)。
+当前版本：`v0.1.3`。仓库：[fidigit/finanncial_data](https://github.com/fidigit/finanncial_data)。
 
 MySQL密码配置：[v0.0.9发布说明](docs/release-v0.0.9.md)。原目录升级命令沿用[v0.0.7部署步骤](docs/release-v0.0.7.md)。
 

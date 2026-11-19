@@ -43,7 +43,7 @@ def test_transfer_roundtrip_preserves_query_configuration_accounts_and_samples(t
     files=backup_state(db_file,csv_file,bundle)
     assert files==['app.db','参考数据.csv','data/sales-source-samples.json']
     manifest=json.loads((bundle/'manifest.json').read_text(encoding='utf-8'))
-    assert manifest['version']=='v0.1.2' and set(manifest['sha256'])==set(files)
+    assert manifest['version']=='v0.1.3' and set(manifest['sha256'])==set(files)
     target=tmp_path/'deployment'
     restored=restore_state(bundle,target)
     assert 'data/app.db' in restored
