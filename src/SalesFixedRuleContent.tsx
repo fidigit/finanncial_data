@@ -7,12 +7,13 @@ export const RULE_PARAMETERS: Record<string, RuleParameter[]> = {
   X: [
     { key:'threshold', label:'同BD季度奖金计算基数合计门槛（元）', sample:30000, kind:'amount' },
     { key:'renewal_rate', label:'续费提点（%）', sample:3, kind:'rate' },
+    { key:'renewal_excess', label:'续费超额提点（%）', sample:5, kind:'rate' },
     { key:'self_rate', label:'自拓目标内提点（%）', sample:10, kind:'rate' },
     { key:'self_excess', label:'自拓超额提点（%）', sample:15, kind:'rate' },
     { key:'market_rate', label:'市场推荐目标内提点（%）', sample:8, kind:'rate' },
     { key:'market_excess', label:'市场推荐超额提点（%）', sample:13, kind:'rate' },
     { key:'partner_rate', label:'协会/合伙人目标内提点（%）', sample:5, kind:'rate' },
-    { key:'partner_excess', label:'协会/合伙人超额提点（%）', sample:8, kind:'rate' },
+    { key:'partner_excess', label:'转介绍超额提点（%）', sample:10, kind:'rate' },
   ],
 };
 export type RuleDraft = Record<string, number | boolean | null>;
@@ -97,9 +98,9 @@ export function SalesFixedRuleContent({ column, inputs, draft, onChange, disable
     <p>同BD本季度所有计入基数合计低于下方门槛 → 提点0%；达到门槛后再判断购买性质和渠道。</p>
     {field('threshold')}
     <p>季度合计的每笔基数＝订单金额×按订单号、BD查得的拆分比例，并逐笔保留2位；无拆分时取订单金额。是否包含不计提订单，沿用“累计营收”中的口径设置。</p>
-    <strong>② 续费</strong><p>购买性质为续费，使用下方续费提点，不走新客的目标分档。</p>{field('renewal_rate')}
+    <strong>② 续费</strong><p>续费忽略市场及转介绍渠道，目标内3%、超额5%，跨目标时分别计奖。</p>{field('renewal_rate')}{field('renewal_excess')}
     <strong>③ 首购／新客：先确定渠道</strong>
-    <p>存在协会／合伙人推荐 → 协会／合伙人；否则，来自市场 → 市场推荐；否则 → 自拓。客户推荐但计奖渠道未确认时，保留待配置。</p>
+    <p>转介绍渠道按目标内5%、超额10%；市场渠道按8%、13%；两者为空时按10%、15%。</p>
     <strong>④ 查询季度目标，再比较累计金额</strong>
     <p>按BD姓名和季度从【奖金汇总表】读取直接营收目标；未配置目标时保留待配置。当前目标：<b>{showValue(calc?.target)}</b>元。</p>
     <p>累计金额按同BD、同季度付款顺序，将订单金额×拆分比例逐笔保留2位后合计。累计金额≤目标取目标内提点，严格超过目标取超额提点。</p>
@@ -110,7 +111,6 @@ export function SalesFixedRuleContent({ column, inputs, draft, onChange, disable
     </tbody></table>
     <strong>⑤ 跨目标订单分两段</strong>
     <div className="sales-fixed-equation">目标内金额＝本单基数与“目标－（截至本单累计－本单基数）”非负部分的较小值；超额金额＝本单基数－目标内金额。</div>
-    <p>两部分均大于0时显示两段提点；奖金分别乘以上表对应提点后相加。续费仍按续费提点；无效或缺失输入不当作0。</p>
-    <p className="subtext">本列仅开放1个金额门槛和7个提点。VIP门槛由“是否计发提成”维护，季度目标、推荐信息及订单金额属于源头数据。</p>
+    <p>两部分均大于0时显示两段提点，奖金分别计算后相加。同BD同季度一旦达到目标，后续订单按其类型使用高档提点。续费同样分段。</p>
   </div>;
 }

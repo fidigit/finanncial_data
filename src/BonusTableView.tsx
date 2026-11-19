@@ -53,14 +53,13 @@ export default function BonusTableView<T extends object>({ columns, pagination, 
   </section>;
 }
 
-export async function downloadBonus(kind: string, query: Record<string, string | number>) {
-  const params = new URLSearchParams(Object.entries(query).filter(([key]) => !['page', 'page_size'].includes(key)).map(([key, value]) => [key, String(value)]));
-  const response = await fetch(`/api/bonus-export/${kind}?${params}`, { credentials: 'same-origin' });
+export async function downloadBonus() {
+  const response = await fetch('/api/bonus-export/all', { credentials: 'same-origin' });
   if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || '导出失败，请重新登录后重试'); }
   const disposition=response.headers.get('Content-Disposition')||'';
   const encoded=disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
-  const filename=kind==='meetings'?undefined:encoded?decodeURIComponent(encoded):disposition.match(/filename="([^"]+)"/i)?.[1];
+  const filename=encoded?decodeURIComponent(encoded):disposition.match(/filename="([^"]+)"/i)?.[1];
   const url = URL.createObjectURL(await response.blob());
-  const link = document.createElement('a'); link.href = url; link.download = filename || `${({ sales: '销售奖金表', market: '市场奖金表', meetings: '会议奖金明细' } as Record<string,string>)[kind]}.xlsx`; link.click();
+  const link = document.createElement('a'); link.href = url; link.download = filename || '奖金明细.xlsx'; link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

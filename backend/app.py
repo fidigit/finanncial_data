@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, StrictBool, model_validator
 from sqlalchemy import Boolean, Integer, Numeric, String, Text, create_engine, delete, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from backend.reference_data import query_reference
-from backend.commission_data import service_key, record_key, project_row, with_display_note
+from backend.commission_data import service_key, record_key, project_row, refund_key, with_display_note
 
 ROOT = Path(__file__).resolve().parent.parent
 DEMO = os.getenv('DEMO_MODE', 'true').lower() == 'true'
@@ -150,7 +150,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title='商务数据分析 API', version='0.0.9', lifespan=lifespan, docs_url='/api/docs' if DEMO else None, redoc_url=None, openapi_url='/api/openapi.json' if DEMO else None)
+app = FastAPI(title='商务数据分析 API', version='0.1.2', lifespan=lifespan, docs_url='/api/docs' if DEMO else None, redoc_url=None, openapi_url='/api/openapi.json' if DEMO else None)
 
 
 @app.middleware('http')
@@ -401,6 +401,9 @@ def commission_data(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1,
     if category == 'sales':
         from backend.sales_formulas import sales_response
         return sales_response(db, user, page, page_size, search, quarter, owner)
+    if category == 'market':
+        from backend.market_formulas import market_response
+        return market_response(db, user, page, page_size, search, quarter, owner)
     snapshot = commission_snapshot(db, user, page=page, page_size=page_size, search=search, quarter=quarter, owner=owner, category=category)
     from backend.bonus_rules import shared_service_rule, GLOBAL_KEY, setting_payload, order_year, YEAR_PLAN_PREFIX
     settings = {s.key: s for s in db.scalars(select(SystemSetting))}
@@ -420,7 +423,7 @@ def commission_data(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1,
         rule = shared_service_rule(settings, values.get('付费项目', ''), values.get('订单金额'), minimum, order_year(values))
         if rule:
             rules[values.get('付费项目', '')] = rule
-        records.append(with_display_note(project_row(row, rule, confirmation)))
+        records.append(with_display_note(project_row(row, rule, confirmation, refund_key(values.get('订单号', '')) in settings)))
     pending = sorted({r['service'] for r in records if r['enabled'] is None})
     return {'rows': records, 'total': snapshot['total'], 'options': snapshot['options'], 'pending_services': pending, 'can_edit': user.role in ('admin', 'superadmin'), 'can_edit_note': True, 'rules': rules}
 
@@ -476,7 +479,8 @@ def save_commission_confirmation(body: CommissionConfirmationBody, user=Depends(
     if not row:
         raise HTTPException(409, '来源记录已变化，请刷新后重新确认')
     previous = db.get(SystemSetting, body.record_key)
-    payload = body.model_dump_json(exclude={'record_key', 'version'})
+    old = json.loads(previous.value) if previous else {}
+    payload = json.dumps({**old, **body.model_dump(mode='json', exclude={'record_key', 'version', 'is_refunded'})}, ensure_ascii=False)
     if previous:
         from sqlalchemy import update
         result = db.execute(update(SystemSetting).where(SystemSetting.key == body.record_key, SystemSetting.version == body.version).values(value=payload, version=body.version+1))

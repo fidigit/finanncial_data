@@ -11,7 +11,7 @@ type Source = { kind:string; title:string; sheet:string; columns:string[]; rows:
 const sources = [ ['splits','拆分订单表'], ['targets','奖金汇总表'], ['services','奖金方案'], ['orders','C 订单号'], ['segmentation','Z 是否适用分段计算'], ['constants','公共常数'] ];
 const hiddenSources = new Set(['splits', 'constants', 'orders', 'segmentation']);
 
-export function SalesSourceEntries({onlyServices=false}:{onlyServices?:boolean}) {
+export function SalesSourceEntries() {
   const {modal}=App.useApp();
   const [dirty,setDirty]=useState(false),[editorBusy,setEditorBusy]=useState(false);
   const [kind, setKind] = useState('');
@@ -27,7 +27,7 @@ export function SalesSourceEntries({onlyServices=false}:{onlyServices?:boolean})
   const editor=['targets','services','constants'].includes(kind);
   const close=()=>{if(editorBusy)return; if(dirty)modal.confirm({title:'放弃尚未保存的修改？',okText:'放弃并关闭',cancelText:'继续编辑',onOk:()=>{setDirty(false);setKind('');}});else setKind('');};
   return <>
-    <Space size={4} wrap className="sales-source-entries">{sources.filter(([key])=>!hiddenSources.has(key)&&(!onlyServices||key==='services')).map(([key, title]) => <Button key={key} size="small" icon={<DatabaseOutlined />} onClick={() => {setDirty(false);setKind(key);}}>{title}</Button>)}</Space>
+    <Space size={4} wrap className="sales-source-entries">{sources.filter(([key])=>!hiddenSources.has(key)).map(([key, title]) => <Button key={key} size="small" icon={<DatabaseOutlined />} onClick={() => {setDirty(false);setKind(key);}}>{title}</Button>)}</Space>
     <Modal title={editor?sources.find(x=>x[0]===kind)?.[1]:data?.title || sources.find(x => x[0] === kind)?.[1]} open={!!kind} onCancel={close} closable={!editorBusy} maskClosable={!editorBusy} keyboard={!editorBusy} footer={<Space>{!editor&&<Tag>{kind==='orders'?'后台订单 · 只读查看':'原表样例 · 只读预览'}</Tag>}<Button disabled={editorBusy} onClick={close}>关闭</Button></Space>} width="80vw" style={{ top: '10vh', paddingBottom: 0 }} classNames={{ wrapper: 'sales-source-modal-wrap', container: 'sales-source-modal', mask: 'sales-source-mask' }}>
       {editor?<SalesSourceEditor key={kind} kind={kind as EditorKind} onDirtyChange={setDirty} onBusyChange={setEditorBusy}/>:kind==='orders'?<OrderSourceTable/>:<>
       <p className="subtext">{data?.note || '正在读取原表样例…'}</p>

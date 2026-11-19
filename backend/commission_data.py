@@ -16,7 +16,11 @@ def record_key(row):
     return 'commission_record_' + hashlib.sha256(identity.encode()).hexdigest()[:40]
 
 
-def project_row(row, rule=None, confirmation=None):
+def refund_key(order_no):
+    return 'bonus_refund_' + hashlib.sha256(order_no.strip().encode()).hexdigest()[:40]
+
+
+def project_row(row, rule=None, confirmation=None, refunded=False):
     values = row['values']
     confirmed = confirmation or {}
     enabled = confirmed.get('enabled')
@@ -40,9 +44,9 @@ def project_row(row, rule=None, confirmation=None):
         'bonus_basis': confirmed.get('bonus_basis'),
         'market_bd': confirmed.get('market_bd', ''),
         'market_pending': '市场同事推荐' in source and not confirmed.get('market_bd'),
-        'referral': values.get('订单来源','') if '_source_id' in values else referral, 'revenue_total': None, 'tier_rate': None,
+        'referral': referral, 'revenue_total': None, 'tier_rate': None,
         'confirmed_rate': confirmed.get('confirmed_rate'), 'bonus': confirmed.get('bonus'),
-        'is_paid': confirmed.get('is_paid'), 'is_refunded': confirmed.get('is_refunded'),
+        'is_paid': confirmed.get('is_paid'), 'is_refunded': True if refunded else confirmed.get('is_refunded'),
         'note': confirmed.get('note', ''), 'source_bonus': values.get('奖金金额', ''),
         'version': confirmed.get('version', 0), 'confirmation': confirmed,
     }

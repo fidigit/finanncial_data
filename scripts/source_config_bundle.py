@@ -18,9 +18,11 @@ KINDS = {'splits', 'targets', 'services', 'orders', 'segmentation'}
 TARGETS = 'bonus_revenue_targets'
 LEGACY_PLAN = 'bonus_service_plan_2025'
 CONSTANTS = 'bonus_global_parameters'
+MARKET_RATES = 'bonus_market_parameters'
+MARKET_RATE_FIELDS = {'direct_referral', 'direct_no_referral', 'indirect_first', 'renewal_low', 'renewal_high'}
 DEFAULTS = dict(vip_minimum='1680', threshold='30000', renewal_rate='3',
                 self_rate='10', self_excess='15', market_rate='8', market_excess='13',
-                partner_rate='5', partner_excess='8', include_ineligible=True)
+                partner_rate='5', partner_excess='10', renewal_excess='5', include_ineligible=True)
 
 
 def canonical(value):
@@ -28,7 +30,7 @@ def canonical(value):
 
 
 def allowed(key):
-    return key in (TARGETS, LEGACY_PLAN, CONSTANTS) or re.fullmatch(r'bonus_service_plan_year_20\d{2}', key) is not None
+    return key in (TARGETS, LEGACY_PLAN, CONSTANTS, MARKET_RATES) or re.fullmatch(r'bonus_service_plan_year_20\d{2}', key) is not None
 
 
 def read_db(path):
@@ -53,6 +55,7 @@ def identity(key, row):
         if not isinstance(name, str) or not name.strip() or name != name.strip() or not re.fullmatch(r'20\d{2}Q[1-4]', str(quarter)):
             raise ValueError('季度目标缺少有效姓名/季度')
         numeric(row.get('直接营收目标'), Decimal('0.0000001'), Decimal('1000000000000'), nullable=True)
+        numeric(row.get('市场二段提成门槛'), Decimal('0.01'), Decimal('1000000000000'), nullable=True)
         return name, quarter
     name = row.get('所购服务')
     if not isinstance(name, str) or not name.strip() or name != name.strip() or row.get('是否计入提成范围') not in ('是', '否', None):
@@ -72,6 +75,12 @@ def validate_setting(key, value):
                     raise ValueError('累计口径必须是布尔值')
             else:
                 numeric(number, 0, 1000000000000 if field in ('vip_minimum', 'threshold') else 100)
+        return
+    if key == MARKET_RATES:
+        if set(value) != MARKET_RATE_FIELDS:
+            raise ValueError('市场提点参数缺失或未知')
+        for number in value.values():
+            numeric(number, 0, 100)
         return
     if not isinstance(value.get('rows'), list):
         raise ValueError('配置缺少rows：' + key)
@@ -134,13 +143,17 @@ def load_bundle(path):
 
 
 def merge_setting(key, existing, incoming, prefer_package):
-    if key == CONSTANTS:
+    if key in (CONSTANTS, MARKET_RATES):
         return {**existing, **incoming} if prefer_package else {**incoming, **existing}
     validate_setting(key, existing)
     rows = {identity(key, row): row for row in existing['rows']}
     for row in incoming['rows']:
         ident = identity(key, row)
-        if prefer_package or ident not in rows:
+        if ident not in rows:
+            rows[ident] = row
+        elif key == TARGETS:
+            rows[ident] = {**rows[ident], **row} if prefer_package else {**row, **rows[ident]}
+        elif prefer_package:
             rows[ident] = row
     return {**incoming, **existing, 'rows': list(rows.values())}
 

@@ -55,6 +55,23 @@ def test_sales_cross_target_and_full_quarter_gate():
     assert Decimal(calculate_sales([sales_case('29999.99', threshold='30000')])[0]['bonus']) == 0
 
 
+@pytest.mark.parametrize('channel,purchase,low,high',[
+    ('self','首购','0.10','0.15'),('market','首购','0.08','0.13'),
+    ('partner','首购','0.05','0.10'),('market','续费','0.03','0.05')])
+def test_four_two_tier_rates_and_all_subsequent_orders(channel,purchase,low,high):
+    from backend.sales_formulas import calculate_sales
+    cases=[sales_case(amount,target='100',purchase=purchase,row_id=i+1,variables={'channel':channel,'market_name':'市场甲','market_recommended':True})
+           for i,amount in enumerate(['90','20','10','10'])]
+    rows=calculate_sales(cases)
+    assert Decimal(rows[0]['bonus'])==Decimal('90')*Decimal(low)
+    assert Decimal(rows[1]['bonus'])==Decimal('10')*(Decimal(low)+Decimal(high))
+    assert rows[1]['calculation']['crossing'] is True
+    assert all(Decimal(r['confirmed_rate'])==Decimal(high) for r in rows[2:])
+    assert all(Decimal(r['bonus'])==Decimal('10')*Decimal(high) for r in rows[2:])
+    if purchase=='续费':
+        assert all(not r['market_bd'] and not r['referral'] for r in rows)
+
+
 def test_sales_missing_values_and_ineligible_accumulation():
     from backend.sales_formulas import calculate_sales
     rows = calculate_sales([sales_case('100', target='150', enabled=False), sales_case('100', target='150', row_id=2)])
@@ -75,7 +92,7 @@ def test_sales_channels_split_renewal_and_manual_priority():
         row = calculate_sales([sales_case('100', variables={'channel': channel})])[0]
         assert Decimal(row['bonus']) == Decimal(expected)
     row = calculate_sales([sales_case('100', target=None, purchase='续费')])[0]
-    assert Decimal(row['bonus']) == 3
+    assert row['bonus'] is None
     row = calculate_sales([sales_case('100.01', variables={'split_amount': '1', 'split_total': '2'})])[0]
     assert row['bonus_basis'] == '50.01'
     row = calculate_sales([sales_case('100', variables={'refund_amount': '25'}, confirmation={'bonus': '77.00'})])[0]
@@ -104,8 +121,8 @@ def test_sales_inputs_scope_recalculation_and_market_isolation(business_accounts
         filtered = manager.get('/api/commission-data', params={'category': 'sales', 'owner': '何卫', 'search': first['order_no']}).json()['rows'][0]
         assert first['bonus'] == filtered['bonus'] and first['revenue_total'] == filtered['revenue_total']
         names, exported = workbook_sheets(manager.get('/api/bonus-export/sales', params={'owner': '何卫', 'quarter': row['quarter']}).content)
-        assert names == ['何卫']
-        exported_bonus = exported[0][1][15].find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v').text
+        assert names == ['奖金汇总表', '销售-何卫', '会议']
+        exported_bonus = exported[1][1][15].find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v').text
         assert Decimal(exported_bonus) == Decimal(first['bonus'])
         assert manager.get('/api/commission-data?category=market').json()['total'] == market_before['total']
         bad = {**query, 'version': 0, 'note': '测试无效变量', 'variables': {'split_amount': 2, 'split_total': 1}}
@@ -142,7 +159,7 @@ def test_v2_classification_and_export_scope(business_accounts):
         assert manager.get('/api/commission-data?category=sales&owner=周政').json()['total'] == 0
         exported = manager.get('/api/bonus-export/sales?owner=何卫')
         names, rows = workbook_sheets(exported.content)
-        assert names == ['何卫'] and len(rows[0]) == 308
+        assert names == ['奖金汇总表', '销售-何卫', '会议'] and len(rows[1]) == 308
     with client_as('何卫', 'Test-only-password!') as bd:
         assert bd.get('/api/bd-categories').status_code == 403
         assert bd.put('/api/bd-categories', json=payload).status_code == 403
@@ -150,9 +167,9 @@ def test_v2_classification_and_export_scope(business_accounts):
         assert bd.get('/api/commission-data?category=market').json()['total'] == 0
         assert bd.get('/api/commission-data?owner=周政').json()['total'] == 0
         names, rows = workbook_sheets(bd.get('/api/bonus-export/sales').content)
-        assert names == ['何卫'] and len(rows[0]) == 308
+        assert names == ['奖金汇总表', '销售-何卫', '会议'] and len(rows[1]) == 308
         names, _ = workbook_sheets(bd.get('/api/bonus-export/market?owner=周政').content)
-        assert names == ['无数据']
+        assert names == ['奖金汇总表', '会议']
     with client_as('梁梓珊', 'Test-only-password!') as special:
         assert special.get('/api/bd-categories').status_code == 200
     with client_as() as manager:
@@ -171,8 +188,8 @@ def test_v2_meetings_permissions_validation_and_conflict(business_accounts):
         assert manager.post('/api/meetings', json={**payload, 'owner': '不存在'}).status_code == 422
         assert manager.put('/api/meetings/'+record_id, json={**payload, 'version': 1, 'bonus': '300.00'}).status_code == 200
         assert manager.put('/api/meetings/'+record_id, json={**payload, 'version': 1}).status_code == 409
-        names, _ = workbook_sheets(manager.get('/api/bonus-export/meetings').content)
-        assert set(names) == {'何卫', '周政'}
+        names, sheets = workbook_sheets(manager.get('/api/bonus-export/meetings').content)
+        assert names[-1] == '会议' and len(sheets[-1]) == 3
     with client_as('何卫', 'Test-only-password!') as bd:
         rows = bd.get('/api/meetings').json()['rows']
         assert len(rows) == 1 and rows[0]['owner'] == '何卫' and rows[0]['bonus'] == '300.00'
@@ -180,7 +197,29 @@ def test_v2_meetings_permissions_validation_and_conflict(business_accounts):
         assert bd.post('/api/meetings', json=payload).status_code == 403
         assert bd.put('/api/meetings/'+record_id, json={**payload, 'version': 2}).status_code == 403
         names, rows = workbook_sheets(bd.get('/api/bonus-export/meetings').content)
-        assert names == ['何卫'] and len(rows[0]) == 2
+        assert names[-1] == '会议' and len(rows[-1]) == 2
+        assert bd.put('/api/meetings/'+record_id+'/payment', json={'version':2,'is_paid':True}).status_code in (404, 405)
+        assert bd.put('/api/meetings/'+record_id+'/note', json={'version':2,'note':'会后补充'}).status_code == 200
+        updated = bd.get('/api/meetings').json()['rows'][0]
+        assert updated['note'] == '人工确认' and updated['action_note'] == '会后补充'
+    with client_as() as manager:
+        from urllib.parse import unquote
+        assert manager.put('/api/meetings/'+record_id+'/payment', json={'version':3,'is_paid':True}).status_code in (404, 405)
+        detail_update = {**payload, 'is_paid': True, 'version': 3, 'employee_no': 'TEST01', 'meeting_type': '专场会议', 'bonus_formula': True}
+        assert manager.put('/api/meetings/'+record_id, json=detail_update).status_code == 200
+        updated = manager.get('/api/meetings?owner=何卫').json()['rows'][0]
+        assert (updated['employee_no'], updated['bonus'], updated['is_paid'], updated['action_note']) == ('TEST01','1000.00',None,'会后补充')
+        workbook = manager.get('/api/bonus-export/all?owner=何卫')
+        names, _ = workbook_sheets(workbook.content)
+        filename = unquote(workbook.headers['content-disposition'].split("filename*=UTF-8''")[1])
+        sheet_path = f'xl/worksheets/sheet{names.index("会议")+1}.xml'
+        tampered = patch_xlsx(workbook.content, {sheet_path:{'P2':'改备注'}})
+        assert manager.post('/api/bonus-import/all',params={'filename':filename},content=tampered).status_code == 422
+        edited = patch_xlsx(workbook.content, {sheet_path:{'O2':'是'}})
+        assert manager.post('/api/bonus-import/all',params={'filename':filename},content=edited).status_code == 200
+        assert manager.get('/api/meetings?owner=何卫').json()['rows'][0]['is_paid'] is True
+    with client_as('周政', 'Test-only-password!') as other:
+        assert other.put('/api/meetings/'+record_id+'/note', json={'version':5,'note':'越权'}).status_code == 404
 
 
 def test_v2_workbook_names_and_literal_formula():
@@ -542,7 +581,7 @@ def test_sales_source_samples_are_scoped_and_do_not_change_orders(business_accou
             response = manager.get('/api/sales-workspace/sources/' + kind)
             assert response.status_code == 200 and response.json()['read_only'] is True
             assert response.json()['sample'] is (kind not in ('constants','orders'))
-        assert len(manager.get('/api/sales-workspace/sources/constants').json()['rows']) == 9
+        assert len(manager.get('/api/sales-workspace/sources/constants').json()['rows']) == 10
         assert manager.get('/api/sales-workspace/sources/unknown').status_code == 404
         after = manager.get('/api/commission-data?category=sales&owner=何卫').json()
         assert before == after
@@ -705,7 +744,7 @@ def test_fixed_eligibility_api_locks_rule_and_previews_global_parameter(business
         assert [item for item in manager.get('/api/sales-formulas/definitions').json()['definitions'] if item['column'] != 'S'] == others
         names,sheets = workbook_sheets(manager.get('/api/bonus-export/sales',params={'owner':'何卫'}).content)
         index = next(i for i,row in enumerate(after['rows']) if row['record_key'] == chosen['record_key'])
-        assert Decimal(sheets[0][index+1][15].find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v').text) == 0
+        assert Decimal(sheets[1][index+1][15].find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v').text) == 0
     with client_as('何卫','Test-only-password!') as bd:
         assert bd.post('/api/sales-formulas/eligibility/preview',json=payload).status_code == 403
 
@@ -748,7 +787,7 @@ def test_fixed_rule_parameter_whitelist_preview_persistence_scope_and_export(bus
         assert manager.get('/api/commission-data?category=market').json()==market
         _,sheets=workbook_sheets(manager.get('/api/bonus-export/sales',params={'owner':'何卫'}).content)
         index=next(i for i,row in enumerate(after['rows']) if row['record_key']==chosen['record_key'])
-        assert Decimal(sheets[0][index+1][15].find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v').text)==Decimal(new['bonus'])
+        assert Decimal(sheets[1][index+1][15].find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v').text)==Decimal(new['bonus'])
         restore=manager.put('/api/sales-formulas/parameters/X',json={**body,'version':version,'parameters':{'self_rate':'10'}})
         assert restore.status_code==200
         assert manager.get('/api/commission-data',params={'category':'sales','owner':'何卫','page_size':100}).json()['rows']==before['rows']
@@ -850,12 +889,13 @@ def test_global_service_source_parameters_targets_and_exports(business_accounts,
         context,config=inputs[0]
         response=manager.put('/api/sales-formulas/parameters/X',json={**context,'version':config['period_version'],'parameters':{'threshold':'0'}})
         assert response.status_code==200,response.text
-        initial=rows();assert all(Decimal(r['bonus'])==Decimal('50.4') for r in initial[:4])
+        initial=rows()
+        assert [None if r['bonus'] is None else Decimal(r['bonus']) for r in initial[:4]]==[Decimal('50.4'),None,Decimal('50.4'),Decimal('50.4')]
         config=manager.get('/api/sales-formulas/inputs',params=context).json()
         rate_body={**context,'version':config['period_version'],'parameters':{'renewal_rate':'6'}}
         rate_saved=manager.put('/api/sales-formulas/parameters/X',json=rate_body)
         assert rate_saved.status_code==200,rate_saved.text
-        assert all(Decimal(r['bonus'])==Decimal('100.8') for r in rows()[:4])
+        assert [None if r['bonus'] is None else Decimal(r['bonus']) for r in rows()[:4]]==[Decimal('100.8'),None,Decimal('100.8'),Decimal('100.8')]
         for other,old in inputs:
             config=manager.get('/api/sales-formulas/inputs',params=other).json()
             assert config['period']['renewal_rate']=='6' and config['period']['target']==old['period']['target']
@@ -877,7 +917,9 @@ def test_global_service_source_parameters_targets_and_exports(business_accounts,
             new=manager.get('/api/sales-formulas/inputs',params=context).json()
             assert new['period']['vip_minimum']=='2000' and new['period']['target']==old['period']['target']
         names,sheets=workbook_sheets(manager.get('/api/bonus-export/sales').content)
-        for sheet in sheets:
+        for name, sheet in zip(names, sheets):
+            if not name.startswith('销售-'):
+                continue
             vip=[r for r in sheet[1:] if r[4].find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}is/{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t').text=='团队VIP']
             assert vip and all(Decimal(r[15].find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v').text)==0 for r in vip)
         for kind in ['services','targets','constants']:
@@ -1003,7 +1045,7 @@ def test_v005_annual_plan_edit_new_service_year_isolation_and_inheritance(busine
         market=manager.get('/api/commission-data?category=market&owner=周政&search=收费系统户数').json()['rows']
         assert market and all(r['enabled'] is False for r in market)
         _,sheets=workbook_sheets(manager.get('/api/bonus-export/sales?owner=何卫&search=收费系统户数').content)
-        assert all(Decimal(r[15].find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v').text)==0 for r in sheets[0][1:])
+        assert all(Decimal(r[15].find('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v').text)==0 for r in sheets[1][1:])
         version=saved.json()['version']
         assert manager.put('/api/bonus-config/plans/2026',json={'version':version,'rows':[{'service':'收费系统户数','enabled':True}]*2}).status_code==422
         assert manager.put('/api/bonus-config/plans/2026',json={'version':version,'rows':[{'service':'收费系统户数','enabled':'是'}]}).status_code==422
@@ -1092,7 +1134,7 @@ def test_v006_protected_workbook_styles_validation_and_unique_versions(v006_acco
         assert name.endswith('_20261112-120000_v1.xlsx')
         with zipfile.ZipFile(io.BytesIO(first.content)) as book:
             ns={'m':bonus_transfer.MAIN}
-            sheet=ET.fromstring(book.read('xl/worksheets/sheet1.xml'))
+            sheet=ET.fromstring(book.read('xl/worksheets/sheet2.xml'))
             assert sheet.find('m:sheetProtection',ns).get('sheet')=='1'
             assert sheet.find('m:sheetProtection',ns).get('autoFilter')=='0'
             assert sheet.find('m:autoFilter',ns).get('ref').startswith('A1:T')
@@ -1101,7 +1143,7 @@ def test_v006_protected_workbook_styles_validation_and_unique_versions(v006_acco
             assert sheet.find('.//m:c[@r="T2"]//m:t',ns).text==row['order_no']
             assert sheet.find('.//m:c[@r="T2"]',ns).get('s')=='1'
             assert sheet.find('m:sheetViews/m:sheetView/m:pane',ns).get('ySplit')=='1'
-            for ref,style in [('A2','1'),('P2','1'),('S2','1'),('Q2','2'),('R2','2'),('Q1','3')]:
+            for ref,style in [('A2','1'),('P2','1'),('S2','1'),('Q2','2'),('R2','1'),('Q1','3')]:
                 assert sheet.find('.//m:c[@r="'+ref+'"]',ns).get('s')==style
             validation=sheet.find('m:dataValidations/m:dataValidation',ns)
             assert validation.get('type')=='list' and validation.get('allowBlank')=='0' and validation.get('errorStyle')=='stop'
@@ -1114,15 +1156,35 @@ def test_v006_protected_workbook_styles_validation_and_unique_versions(v006_acco
             xfs=styles.find('m:cellXfs',ns)
             assert xfs[1].find('m:protection',ns).get('locked')=='1' and xfs[2].find('m:protection',ns).get('locked')=='0'
             assert b'BDExport' in book.read('docProps/custom.xml')
-        tampered=patch_xlsx(first.content,{'xl/worksheets/sheet1.xml':{'T2':'changed-order-id'}})
-        assert manager.post('/api/bonus-import/sales/preview',params={'filename':name},content=tampered).status_code==422
+        tampered=patch_xlsx(first.content,{'xl/worksheets/sheet2.xml':{'T2':'changed-order-id'}})
+        assert manager.post('/api/bonus-import/all/preview',params={'filename':name},content=tampered).status_code==422
         second,_,_=export_one(manager)
         assert second.headers['x-export-version']=='20261112-120000_v2'
         third,_,_=export_one(manager,kind='market',owner='周政')
         assert third.headers['x-export-version']=='20261112-120000_v3'
         meeting=manager.get('/api/bonus-export/meetings')
-        assert 'x-export-version' not in meeting.headers
-        assert manager.get('/api/bonus-import/latest').json()['suffix']=='20261112-120000_v3'
+        assert meeting.headers['x-export-version'] == '20261112-120000_v4'
+        names, _ = workbook_sheets(meeting.content)
+        assert names[-1] == '会议' and '销售-何卫' in names and '市场-周政' in names
+        assert names[0] == '奖金汇总表'
+        assert all(name.startswith(('销售-', '市场-')) for name in names[1:-1])
+        with zipfile.ZipFile(io.BytesIO(meeting.content)) as book:
+            summary = ET.fromstring(book.read('xl/worksheets/sheet1.xml'))
+            assert summary.find('m:sheetProtection', ns).get('sheet') == '1'
+            assert summary.find('m:dataValidations', ns) is None
+            assert summary.find('m:mergeCells/m:mergeCell[@ref="D3:G3"]', ns) is not None
+            assert summary.find('.//m:c[@r="A2"]//m:t', ns).text == '统计周期：2026Q4'
+        from urllib.parse import unquote
+        full_name = unquote(meeting.headers['content-disposition'].split("filename*=UTF-8''")[1])
+        updates = {
+            f'xl/worksheets/sheet{names.index("销售-何卫")+1}.xml': {'Q2': '是'},
+            f'xl/worksheets/sheet{names.index("市场-周政")+1}.xml': {'Q2': '否'},
+        }
+        tampered = patch_xlsx(meeting.content, {**updates, 'xl/worksheets/sheet1.xml': {'A2':'改统计周期'}})
+        assert manager.post('/api/bonus-import/all', params={'filename':full_name}, content=tampered).status_code == 422
+        updated = manager.post('/api/bonus-import/all', params={'filename':full_name}, content=patch_xlsx(meeting.content, updates))
+        assert updated.status_code == 200 and updated.json()['changed_count'] == 2
+        assert manager.get('/api/bonus-import/latest').json()['suffix']=='20261112-120000_v4'
         monkeypatch.setattr(bonus_transfer,'export_second',lambda:'20261112-120001')
         next_second,_,_=export_one(manager)
         assert next_second.headers['x-export-version']=='20261112-120001_v1'
@@ -1157,8 +1219,8 @@ def test_v006_note_preloads_generated_text_and_preserves_other_confirmation_fiel
 def test_v006_roundtrip_preview_commit_only_status_and_no_replay(v006_accounts,kind,owner):
     with client_as() as manager:
         exported,filename,original=export_one(manager,kind,owner)
-        edited=patch_xlsx(exported.content,{'xl/worksheets/sheet1.xml':{'Q2':'是','R2':'否'}})
-        url='/api/bonus-import/'+kind
+        edited=patch_xlsx(exported.content,{'xl/worksheets/sheet2.xml':{'Q2':'是'}})
+        url='/api/bonus-import/all'
         preview=manager.post(url+'/preview',params={'filename':filename},content=edited)
         assert preview.status_code==200,preview.text
         assert preview.json()['changed_count']==1
@@ -1167,7 +1229,7 @@ def test_v006_roundtrip_preview_commit_only_status_and_no_replay(v006_accounts,k
         result=manager.post(url,params={'filename':filename},content=edited)
         assert result.status_code==200,result.text
         after=manager.get('/api/commission-data',params={'category':kind,'owner':owner}).json()['rows'][0]
-        assert after['is_paid'] is True and after['is_refunded'] is False
+        assert after['is_paid'] is True and after['is_refunded'] is None
         for key in ['owner','order_amount','bonus_basis','confirmed_rate','bonus','note']:
             assert after[key]==before[key]
         assert manager.post(url,params={'filename':filename},content=edited).status_code==409
@@ -1178,30 +1240,30 @@ def test_v006_rejects_old_renamed_foreign_and_other_kind_files(v006_accounts):
     with client_as() as manager:
         old,old_name,row=export_one(manager)
         newest,new_name,_=export_one(manager)
-        assert manager.post('/api/bonus-import/sales/preview',params={'filename':old_name},content=old.content).status_code==409
-        assert manager.post('/api/bonus-import/sales/preview',params={'filename':new_name},content=old.content).status_code==409
-        assert manager.post('/api/bonus-import/market/preview',params={'filename':new_name},content=newest.content).status_code==409
-        # Exporting meetings must leave the latest protected version intact.
+        assert manager.post('/api/bonus-import/all/preview',params={'filename':old_name},content=old.content).status_code==409
+        assert manager.post('/api/bonus-import/all/preview',params={'filename':new_name},content=old.content).status_code==409
+        assert manager.post('/api/bonus-import/market/preview',params={'filename':new_name},content=newest.content).status_code==404
+        # Any export entry replaces the latest version for this account.
         manager.get('/api/bonus-export/meetings')
-        assert manager.post('/api/bonus-import/sales/preview',params={'filename':new_name},content=newest.content).status_code==200
+        assert manager.post('/api/bonus-import/all/preview',params={'filename':new_name},content=newest.content).status_code==409
     with client_as('何卫','Test-only-password!') as bd:
-        assert bd.post('/api/bonus-import/sales/preview',params={'filename':new_name},content=newest.content).status_code==409
+        assert bd.post('/api/bonus-import/all/preview',params={'filename':new_name},content=newest.content).status_code==409
         own,own_name,_=export_one(bd)
-        assert bd.post('/api/bonus-import/sales/preview',params={'filename':own_name},content=newest.content).status_code==409
-        edited=patch_xlsx(own.content,{'xl/worksheets/sheet1.xml':{'Q2':'是','R2':'待确认'}})
-        result=bd.post('/api/bonus-import/sales',params={'filename':own_name},content=edited)
+        assert bd.post('/api/bonus-import/all/preview',params={'filename':own_name},content=newest.content).status_code==409
+        edited=patch_xlsx(own.content,{'xl/worksheets/sheet2.xml':{'Q2':'是'}})
+        result=bd.post('/api/bonus-import/all',params={'filename':own_name},content=edited)
         assert result.status_code==200,result.text
         assert {r['owner'] for r in bd.get('/api/commission-data?category=sales').json()['rows']}=={'何卫'}
 
 
 @pytest.mark.parametrize('updates',[
-    {'A2':'2027Q1'},{'P2':99999},{'S2':'私改备注'},{'Q2':'已发放'},{'Q2':''},{'R2':1},{'Q2':'=1+1'},
+    {'A2':'2027Q1'},{'P2':99999},{'S2':'私改备注'},{'Q2':'已发放'},{'Q2':''},{'R2':'是'},{'Q2':'=1+1'},
 ])
 def test_v006_rejects_locked_cells_invalid_flags_and_formulas(v006_accounts,updates):
     with client_as() as manager:
         exported,filename,row=export_one(manager)
-        edited=patch_xlsx(exported.content,{'xl/worksheets/sheet1.xml':updates})
-        result=manager.post('/api/bonus-import/sales',params={'filename':filename},content=edited)
+        edited=patch_xlsx(exported.content,{'xl/worksheets/sheet2.xml':updates})
+        result=manager.post('/api/bonus-import/all',params={'filename':filename},content=edited)
         assert result.status_code==422,result.text
         assert manager.get('/api/bonus-import/latest').json()['consumed'] is False
         after=manager.get('/api/commission-data?category=sales&owner=何卫').json()['rows'][0]
@@ -1213,14 +1275,14 @@ def test_v006_atomic_validation_and_changes_after_export_require_new_file(v006_a
         result=manager.get('/api/bonus-export/sales?owner=何卫')
         from urllib.parse import unquote
         filename=unquote(result.headers['content-disposition'].split("filename*=UTF-8''")[1])
-        edited=patch_xlsx(result.content,{'xl/worksheets/sheet1.xml':{'Q2':'是','R2':'否','Q3':'是','R3':'未知'}})
-        assert manager.post('/api/bonus-import/sales',params={'filename':filename},content=edited).status_code==422
+        edited=patch_xlsx(result.content,{'xl/worksheets/sheet2.xml':{'Q2':'是','Q3':'是','R3':'未知'}})
+        assert manager.post('/api/bonus-import/all',params={'filename':filename},content=edited).status_code==422
         before=manager.get('/api/commission-data?category=sales&owner=何卫').json()['rows']
         assert before[0]['version']==before[1]['version']==0
-        valid=patch_xlsx(result.content,{'xl/worksheets/sheet1.xml':{'Q2':'是','R2':'否','Q3':'是','R3':'否'}})
-        assert manager.post('/api/bonus-import/sales/preview',params={'filename':filename},content=valid).status_code==200
+        valid=patch_xlsx(result.content,{'xl/worksheets/sheet2.xml':{'Q2':'是','Q3':'是'}})
+        assert manager.post('/api/bonus-import/all/preview',params={'filename':filename},content=valid).status_code==200
         assert manager.put('/api/commission-data/note',json={'record_key':before[1]['record_key'],'version':0,'note':'导出后另一位同事更新'}).status_code==200
-        assert manager.post('/api/bonus-import/sales',params={'filename':filename},content=valid).status_code==409
+        assert manager.post('/api/bonus-import/all',params={'filename':filename},content=valid).status_code==409
         after=manager.get('/api/commission-data?category=sales&owner=何卫').json()['rows']
         assert after[0]['version']==0 and after[0]['is_paid'] is None and after[1]['is_paid'] is None
         assert manager.get('/api/bonus-import/latest').json()['consumed'] is False
@@ -1248,18 +1310,18 @@ def test_v006_rejects_stale_calculations_and_unsafe_archives(v006_accounts):
     import io,zipfile
     with client_as() as manager:
         exported,filename,row=export_one(manager)
-        bad=manager.post('/api/bonus-import/sales/preview',params={'filename':filename},content=b'not a workbook')
+        bad=manager.post('/api/bonus-import/all/preview',params={'filename':filename},content=b'not a workbook')
         assert bad.status_code==422
         archive=io.BytesIO()
         with zipfile.ZipFile(archive,'w') as z:z.writestr('../evil.xml','x')
-        assert manager.post('/api/bonus-import/sales/preview',params={'filename':filename},content=archive.getvalue()).status_code==422
+        assert manager.post('/api/bonus-import/all/preview',params={'filename':filename},content=archive.getvalue()).status_code==422
         # Changing an input used by an exported row invalidates that snapshot even if confirmation version is unchanged.
         with Session(engine) as db:
             key='commission_service_'+__import__('hashlib').sha256(row['service'].encode()).hexdigest()[:40]
             db.add(SystemSetting(key=key,value=json.dumps({'enabled':True,'note':'导出后变更服务规则'}),version=1))
             db.commit()
-        edited=patch_xlsx(exported.content,{'xl/worksheets/sheet1.xml':{'Q2':'是','R2':'否'}})
-        result=manager.post('/api/bonus-import/sales',params={'filename':filename},content=edited)
+        edited=patch_xlsx(exported.content,{'xl/worksheets/sheet2.xml':{'Q2':'是'}})
+        result=manager.post('/api/bonus-import/all',params={'filename':filename},content=edited)
         assert result.status_code==409,result.text
         assert manager.get('/api/bonus-import/latest').json()['consumed'] is False
 
@@ -1367,6 +1429,12 @@ def test_single_order_eligibility_override_recalculates_and_preserves_other_fiel
         assert row['enabled'] is True and Decimal(row['bonus'])>0
         assert manager.put('/api/commission-data/confirmation',json={'record_key':row['record_key'],'version':row['version'],'note':'原有依据','is_paid':True,'is_refunded':False}).status_code==200
         row=rows()[0]
+        assert row['is_refunded'] is None
+        from backend.app import SystemSetting
+        with Session(engine) as db:
+            historical = db.get(SystemSetting, row['record_key'])
+            historical.value = json.dumps({**json.loads(historical.value), 'is_refunded': False})
+            db.commit()
         assert manager.put('/api/commission-data/note',json={'record_key':row['record_key'],'version':row['version'],'note':'保留自定义备注'}).status_code==200
         row=rows()[0]; original_bonus=row['bonus']; original_basis=row['bonus_basis']
         body={'record_key':row['record_key'],'version':row['version'],'enabled':False}
@@ -1381,8 +1449,8 @@ def test_single_order_eligibility_override_recalculates_and_preserves_other_fiel
         assert export.status_code==200
         _,sheets=workbook_sheets(export.content)
         ns='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
-        assert sheets[0][1][7].find('.//'+ns+'t').text=='否'
-        assert Decimal(sheets[0][1][15].find(ns+'v').text)==0
+        assert sheets[1][1][7].find('.//'+ns+'t').text=='否'
+        assert Decimal(sheets[1][1][15].find(ns+'v').text)==0
         assert manager.put('/api/commission-data/eligibility',json={**body,'version':changed['version'],'enabled':True}).status_code==200
         changed=rows()[0]
         assert changed['enabled'] is True and changed['bonus']==original_bonus
@@ -1470,3 +1538,32 @@ def test_missing_plan_and_missing_service_have_distinct_actionable_diagnostics(b
             missing=shared_service_rule(settings,'真正新增未维护服务',year=2026)
             assert missing['enabled'] is None and missing['issue']=='missing_service' and '2026' in missing['note']
             assert shared_service_rule(settings,'收费系统户数',year=None)['issue']=='invalid_payment_year'
+
+def test_v010_refund_csv_matches_both_roles_and_is_idempotent(v006_accounts, monkeypatch, tmp_path):
+    source = tmp_path / 'refund-source.csv'
+    with source.open('w', encoding='utf-8-sig', newline='') as output:
+        writer = csv.DictWriter(output, fieldnames=fixture_columns)
+        writer.writeheader()
+        for index, (name, order) in enumerate([('何卫','MATCH'), ('周政','MATCH'), ('何卫','KEEP')], 1):
+            writer.writerow({'季度':'2026Q4','BD姓名':name,'付费时间':f'2026-10-{index:02}',
+                             '订单号':order,'订单金额':'100','付费项目':'短信','首购/续费':'首购'})
+    monkeypatch.setenv('REFERENCE_CSV_PATH', str(source))
+    content = '付款时间,订单号,统计日期\n,MATCH,\n,MATCH,\n,UNKNOWN,\n'.encode('gb18030')
+    params = {'filename':'退款订单.csv'}
+    with client_as('何卫', 'Test-only-password!') as bd:
+        assert bd.post('/api/bonus-refunds', params=params, content=content).status_code == 403
+    with client_as() as manager:
+        assert manager.post('/api/bonus-refunds', params=params, content=b'wrong\nvalue').status_code == 422
+        response = manager.post('/api/bonus-refunds', params=params, content=content)
+        assert response.json() == {'orders':2,'matched':1,'added':1,'sales':1,'market':1}
+        assert manager.post('/api/bonus-refunds', params=params, content=content).json()['added'] == 0
+        from backend.bonus_v2 import named_workbook_bytes
+        xlsx = named_workbook_bytes([('退款', [['订单号'], ['MATCH']], None)])
+        assert manager.post('/api/bonus-refunds', params={'filename':'退款.xlsx'}, content=xlsx).json()['matched'] == 1
+        payout = manager.get('/api/bonus-export/all')
+        assert manager.post('/api/bonus-refunds', params={'filename':'发放.xlsx'}, content=payout.content).status_code == 422
+        for kind in ('sales', 'market'):
+            rows = manager.get('/api/commission-data', params={'category':kind}).json()['rows']
+            assert {r['order_no']:r['is_refunded'] for r in rows} == (
+                {'MATCH':True,'KEEP':None} if kind == 'sales' else {'MATCH':True}
+            )

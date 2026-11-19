@@ -16,7 +16,13 @@ from backend.bonus_v2 import save_setting
 
 Quarter = Annotated[str, Field(pattern=r'^20\d{2}Q[1-4]$')]
 Year = Annotated[int, Field(ge=2000, le=2099)]
-COMMON_FIELDS = ['vip_minimum','threshold','renewal_rate','self_rate','self_excess','market_rate','market_excess','partner_rate','partner_excess']
+COMMON_FIELDS = ['vip_minimum','threshold','renewal_rate','renewal_excess','self_rate','self_excess','market_rate','market_excess','partner_rate','partner_excess']
+
+MARKET_RATES_KEY = 'bonus_market_parameters'
+MARKET_DEFAULTS = {
+    'direct_referral': '5', 'direct_no_referral': '10', 'indirect_first': '2',
+    'renewal_low': '3', 'renewal_high': '5',
+}
 
 
 class StrictBody(BaseModel):
@@ -29,6 +35,38 @@ class VersionBody(StrictBody):
 
 def all_settings(db):
     return {s.key:s for s in db.scalars(select(SystemSetting))}
+
+
+def market_rates(settings):
+    return {**MARKET_DEFAULTS, **setting_payload(settings, MARKET_RATES_KEY)}
+
+
+Rate = Annotated[Decimal, Field(ge=0, le=100, max_digits=7, decimal_places=4)]
+
+
+class MarketRateUpdate(VersionBody):
+    direct_referral: Rate
+    direct_no_referral: Rate
+    indirect_first: Rate
+    renewal_low: Rate
+    renewal_high: Rate
+
+
+@app.get('/api/bonus-config/market-rates')
+def get_market_rates(user=Depends(current_user), db: Session=Depends(database)):
+    settings = all_settings(db)
+    saved = settings.get(MARKET_RATES_KEY)
+    return {'parameters': market_rates(settings), 'version': saved.version if saved else 0,
+            'can_edit': user.role in ('admin', 'superadmin')}
+
+
+@app.put('/api/bonus-config/market-rates')
+def put_market_rates(body: MarketRateUpdate, user=Depends(admin), db: Session=Depends(database)):
+    parameters = body.model_dump(mode='json', exclude={'version'})
+    save_setting(db, MARKET_RATES_KEY, json.dumps(parameters), body.version)
+    audit(db, user.username, '修改市场奖金全局提点')
+    db.commit()
+    return get_market_rates(user, db)
 
 
 def previous_quarter(quarter):
@@ -77,7 +115,8 @@ def get_targets(quarter: Quarter | None = None, user=Depends(current_user), db: 
     quarters = sorted(target_quarters(settings, rows), reverse=True)
     selected = quarter or (quarters[0] if quarters else f'{date.today().year}Q{(date.today().month-1)//3+1}')
     prior = previous_quarter(selected)
-    visible = [r for r in rows if r['季度']==selected and (user.role!='bd' or r['BD姓名'].strip()==user.name.strip())]
+    visible = [{field: r.get(field) for field in ('BD姓名', '季度', '直接营收目标')}
+               for r in rows if r['季度']==selected and (user.role!='bd' or r['BD姓名'].strip()==user.name.strip())]
     return {'quarter':selected,'quarters':quarters,'rows':visible,'version':settings[TARGETS_KEY].version if TARGETS_KEY in settings else 0,
             'can_edit':user.role in ('admin','superadmin'),'previous_quarter':prior,'can_copy':prior in quarters,
             'exists':selected in quarters,
@@ -107,7 +146,11 @@ def put_targets(quarter: Quarter, body:TargetUpdate, user=Depends(admin), db:Ses
         raise HTTPException(422,'请通过新增BD入口维护人员')
     if {r['BD姓名'] for r in rows if r['季度']==quarter}-set(names):
         raise HTTPException(422,'不能删除本季度已有BD目标，请保留原有姓名')
-    updated = [r for r in rows if r['季度']!=quarter]+[{'BD姓名':r.owner,'季度':quarter,'直接营收目标':str(r.target) if r.target is not None else None} for r in body.rows]
+    originals = {r['BD姓名']: r for r in rows if r['季度'] == quarter}
+    updated = [r for r in rows if r['季度'] != quarter]
+    for row in body.rows:
+        current = {**originals[row.owner], '直接营收目标': str(row.target) if row.target is not None else None}
+        updated.append(current)
     save_targets(db,settings,updated,body.version,quarter=quarter)
     audit(db,user.username,f'修改{quarter}直接营收目标：{len(body.rows)}位BD')
     db.commit()
@@ -121,12 +164,12 @@ def inherit_targets(quarter:Quarter,body:VersionBody,user=Depends(admin),db:Sess
     if quarter in target_quarters(settings, rows):
         raise HTTPException(409,'本季度已有目标，不能重复沿袭覆盖')
     prior=previous_quarter(quarter)
-    previous={r['BD姓名']:r['直接营收目标'] for r in rows if r['季度']==prior}
+    previous={r['BD姓名']:r.get('直接营收目标') for r in rows if r['季度']==prior}
     if prior not in target_quarters(settings, rows):
         raise HTTPException(409,f'请先建立{prior}目标')
     members=setting_payload(settings,TARGETS_KEY).get('memberships',{})
     names=sorted(name for name in set(known_names(db))|set(previous)|set(members) if target_member_active(settings,name,quarter))
-    added=[{'BD姓名':name,'季度':quarter,'直接营收目标':previous.get(name)} for name in names]
+    added=[{'BD姓名':name, '季度':quarter, '直接营收目标':previous.get(name)} for name in names]
     save_targets(db,settings,rows+added,body.version,quarter=quarter)
     audit(db,user.username,f'沿袭{prior}目标至{quarter}：{len(added)}位BD；未有原值的姓名保留待填写')
     db.commit()
@@ -254,7 +297,7 @@ def get_constants(user=Depends(current_user),db:Session=Depends(database)):
 
 
 class ConstantUpdate(VersionBody):
-    parameters:dict=Field(min_length=1,max_length=9)
+    parameters:dict=Field(min_length=1,max_length=10)
 
 
 @app.put('/api/bonus-config/constants')

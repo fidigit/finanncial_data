@@ -9,17 +9,23 @@ from typing import Literal
 from xml.sax.saxutils import escape, quoteattr
 
 from fastapi import Depends, HTTPException, Query
-from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from backend.app import (app, database, current_user, admin, User, SystemSetting,
-                         audit, commission_data, query_reference)
+                         audit, query_reference)
 
 COMMISSION_FIELDS = [('quarter','季度'),('owner','BD姓名'),('company','付款公司'),('paid_date','付款时间'),('service','所购服务'),('purchase_type','首购/续费'),('order_amount','订单金额'),('enabled','是否计发提成'),('shared_bd','共享订单'),('allocation_ratio','分摊比例'),('bonus_basis','奖金计算基数'),('market_bd','市场渠道'),('referral','转介绍'),('revenue_total','累计营收'),('confirmed_rate','适用提点（分段提点）'),('bonus','奖金'),('is_paid','是否发放'),('is_refunded','是否退款'),('note','备注')]
-MEETING_FIELDS = [('owner','姓名'),('meeting_date','会议时间'),('meeting_type','会议类型'),('location','会议举办地点'),('companies','参会企业数'),('attendees','参会人数'),('friend_rate','好友通过率（≥90%）'),('registrations','六重报名数'),('leads','意向线索企业数（≥5）'),('qualified','是否达标'),('bonus','会议奖金'),('note','特殊情况备注'),('follow_up','会后联系'),('is_paid','还否发放奖金')]
+MEETING_FIELDS = [
+    ('employee_no', '工号'), ('owner', '姓名'), ('meeting_date', '会议时间'),
+    ('meeting_type', '会议类型'), ('location', '会议举办地点'), ('companies', '参会企业数（≥30）'),
+    ('attendees', '参会人数（无要求）'), ('friend_rate', '好友通过率（≥90%）'),
+    ('registrations', '六重报名数'), ('leads', '意向线索企业数（≥5）'), ('qualified', '是否达标'),
+    ('bonus', '会议奖金'), ('note', '特殊情况备注'), ('follow_up', '会后联系'),
+    ('is_paid', '是否发放奖金'), ('action_note', '备注'),
+]
 
 
 def category_manager(user):
@@ -71,6 +77,7 @@ def set_categories(body: CategoriesBody, user=Depends(current_user), db: Session
 
 
 class MeetingBody(BaseModel):
+    employee_no: str = Field(default='', max_length=40)
     owner: str = Field(min_length=1, max_length=80)
     meeting_date: date
     meeting_type: str = Field(min_length=1, max_length=100)
@@ -79,8 +86,9 @@ class MeetingBody(BaseModel):
     attendees: int = Field(ge=0)
     friend_rate: Decimal = Field(ge=0, le=100, max_digits=5, decimal_places=2)
     registrations: int = Field(ge=0)
-    leads: int = Field(ge=0)
+    leads: int | None = Field(default=None, ge=0)
     qualified: bool | None = None
+    bonus_formula: bool = False
     bonus: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=2)
     note: str = Field(default='', max_length=1000)
     follow_up: str = Field(default='', max_length=1000)
@@ -88,10 +96,20 @@ class MeetingBody(BaseModel):
     version: int = Field(default=0, ge=0)
 
 
+def meeting_bonus(meeting_type, qualified):
+    if qualified is False:
+        return '0.00'
+    if qualified is True:
+        return {'参会会议': '500.00', '专场会议': '1000.00'}.get(meeting_type)
+    return None
+
+
 def meeting_rows(db, user, search='', owner=''):
     records = []
     for setting in db.scalars(select(SystemSetting).where(SystemSetting.key.like('meeting_record_%')).order_by(SystemSetting.key)):
-        row = {**json.loads(setting.value), 'id': setting.key, 'version': setting.version}
+        row = {'employee_no': '', 'action_note': '', **json.loads(setting.value), 'id': setting.key, 'version': setting.version}
+        if row.get('bonus_formula'):
+            row['bonus'] = meeting_bonus(row['meeting_type'], row['qualified'])
         if user.role == 'bd' and row['owner'].strip() != user.name.strip():
             continue
         if owner and row['owner'] != owner:
@@ -99,13 +117,13 @@ def meeting_rows(db, user, search='', owner=''):
         if search.strip().casefold() and not any(search.strip().casefold() in str(v).casefold() for v in row.values()):
             continue
         records.append(row)
-    return records
+    return sorted(records, key=lambda row: row['meeting_date'])
 
 
 @app.get('/api/meetings')
 def meetings(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), search: str = Query('', max_length=200), owner: str = Query('', max_length=80), user=Depends(current_user), db: Session = Depends(database)):
     rows = meeting_rows(db, user, search, owner)
-    return {'rows': rows[(page-1)*page_size:page*page_size], 'total': len(rows), 'can_edit': user.role in ('admin', 'superadmin')}
+    return {'rows': rows[(page-1)*page_size:page*page_size], 'total': len(rows), 'can_edit': user.role in ('admin', 'superadmin'), 'can_edit_note': True}
 
 
 def validate_meeting_owner(db, owner):
@@ -118,7 +136,8 @@ def create_meeting(body: MeetingBody, user=Depends(admin), db: Session = Depends
     import uuid
     validate_meeting_owner(db, body.owner)
     key = 'meeting_record_' + uuid.uuid4().hex
-    save_setting(db, key, body.model_dump_json(exclude={'version'}), 0)
+    payload = {**body.model_dump(mode='json', exclude={'version', 'is_paid'}), 'is_paid': None}
+    save_setting(db, key, json.dumps(payload, ensure_ascii=False), 0)
     audit(db, user.username, '新增会议奖金明细：' + body.owner)
     db.commit()
     return {'ok': True, 'id': key}
@@ -126,22 +145,57 @@ def create_meeting(body: MeetingBody, user=Depends(admin), db: Session = Depends
 
 @app.put('/api/meetings/{record_id}')
 def edit_meeting(record_id: str, body: MeetingBody, user=Depends(admin), db: Session = Depends(database)):
-    if not re.fullmatch(r'meeting_record_[a-f0-9]{32}', record_id) or not db.get(SystemSetting, record_id):
-        raise HTTPException(404, '会议记录不存在')
+    setting = find_meeting(db, record_id)
     validate_meeting_owner(db, body.owner)
-    save_setting(db, record_id, body.model_dump_json(exclude={'version'}), body.version)
+    payload = {**json.loads(setting.value), **body.model_dump(mode='json', exclude_unset=True, exclude={'version', 'is_paid'})}
+    save_setting(db, record_id, json.dumps(payload, ensure_ascii=False), body.version)
     audit(db, user.username, '修改会议奖金明细：' + record_id)
     db.commit()
     return {'ok': True}
 
 
+def find_meeting(db, record_id):
+    setting = db.get(SystemSetting, record_id) if re.fullmatch(r'meeting_record_[a-f0-9]{32}', record_id) else None
+    if not setting:
+        raise HTTPException(404, '会议记录不存在或无权限')
+    return setting
+
+
+class MeetingNoteBody(BaseModel):
+    version: int = Field(ge=0)
+    note: str = Field(max_length=4000)
+
+
+def update_meeting_field(db, user, record_id, version, field, value, description):
+    setting = find_meeting(db, record_id)
+    payload = json.loads(setting.value)
+    if user.role == 'bd' and payload['owner'].strip() != user.name.strip():
+        raise HTTPException(404, '会议记录不存在或无权限')
+    payload[field] = value
+    save_setting(db, record_id, json.dumps(payload, ensure_ascii=False), version)
+    audit(db, user.username, f'{description}：{payload["owner"]} {payload["meeting_date"]}')
+    db.commit()
+    return {'ok': True}
+
+
+@app.put('/api/meetings/{record_id}/note')
+def save_meeting_note(record_id: str, body: MeetingNoteBody, user=Depends(current_user), db: Session = Depends(database)):
+    return update_meeting_field(db, user, record_id, body.version, 'action_note', body.note, '修改会议奖金备注')
+
+
 def workbook_bytes(rows, fields):
-    """Minimal OOXML with literal inline strings (never executable Excel formulas)."""
+    """Write one worksheet per owner."""
+
     groups = {}
     for row in rows:
         groups.setdefault(row.get('owner', '').strip() or '未归属', []).append(row)
     if not groups:
         groups['无数据'] = []
+    return named_workbook_bytes((owner, records, fields) for owner, records in sorted(groups.items()))
+
+
+def named_workbook_bytes(worksheets):
+    """Write literal OOXML values with per-sheet columns."""
     out = io.BytesIO()
     ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
     names, sheets, rels, overrides = set(), [], [], []
@@ -155,7 +209,7 @@ def workbook_bytes(rows, fields):
         value = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', str(value))[:32767]
         return '<c t="inlineStr"><is><t xml:space="preserve">' + escape(value) + '</t></is></c>'
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
-        for index, (owner, records) in enumerate(sorted(groups.items()), 1):
+        for index, (owner, records, fields) in enumerate(worksheets, 1):
             base = re.sub(r'[\\/*?:\[\]]', '_', owner).strip("'")[:31] or '未命名'
             name, suffix = base, 1
             while name.casefold() in names:
@@ -165,27 +219,30 @@ def workbook_bytes(rows, fields):
             sheets.append(f'<sheet name={quoteattr(name)} sheetId="{index}" r:id="rId{index}"/>')
             rels.append(f'<Relationship Id="rId{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{index}.xml"/>')
             overrides.append(f'<Override PartName="/xl/worksheets/sheet{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>')
-            values = [[label for _, label in fields]]
-            numeric_fields = {'order_amount', 'bonus_basis', 'revenue_total', 'bonus', 'companies', 'attendees', 'registrations', 'leads'}
-            for row in records:
-                line = []
-                for key, _ in fields:
-                    value = row.get(key)
-                    if key == 'confirmed_rate' and row.get('rate_display'):
-                        value = row['rate_display']
-                    elif key in ('allocation_ratio', 'confirmed_rate') and value is not None:
-                        value = f'{Decimal(str(value)) * 100}%'
-                    elif key == 'friend_rate' and value is not None:
-                        value = f'{value}%'
-                    elif key in numeric_fields and value not in (None, ''):
-                        try:
-                            number = Decimal(str(value))
-                            if number.is_finite():
-                                value = number
-                        except ArithmeticError:
-                            pass
-                    line.append(value)
-                values.append(line)
+            if fields is None:
+                values = records
+            else:
+                values = [[label for _, label in fields]]
+                numeric_fields = {'order_amount', 'bonus_basis', 'revenue_total', 'bonus', 'companies', 'attendees', 'registrations', 'leads'}
+                for row in records:
+                    line = []
+                    for key, _ in fields:
+                        value = row.get(key)
+                        if key == 'confirmed_rate' and row.get('rate_display'):
+                            value = row['rate_display']
+                        elif key in ('allocation_ratio', 'confirmed_rate') and value is not None:
+                            value = f'{Decimal(str(value)) * 100}%'
+                        elif key == 'friend_rate' and value is not None:
+                            value = f'{value}%'
+                        elif key in numeric_fields and value not in (None, ''):
+                            try:
+                                number = Decimal(str(value))
+                                if number.is_finite():
+                                    value = number
+                            except ArithmeticError:
+                                pass
+                        line.append(value)
+                    values.append(line)
             body = ''.join('<row>' + ''.join(cell(v) for v in line) + '</row>' for line in values)
             z.writestr(f'xl/worksheets/sheet{index}.xml', f'<worksheet xmlns="{ns}"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetData>{body}</sheetData></worksheet>')
         z.writestr('xl/workbook.xml', f'<workbook xmlns="{ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{"".join(sheets)}</sheets></workbook>')
@@ -193,17 +250,3 @@ def workbook_bytes(rows, fields):
         z.writestr('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
         z.writestr('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'+''.join(overrides)+'</Types>')
     return out.getvalue()
-
-
-@app.get('/api/bonus-export/{kind}')
-def export_bonus(kind: Literal['sales', 'market', 'meetings'], search: str = Query('', max_length=200), quarter: str = Query('', max_length=30), owner: str = Query('', max_length=100), user=Depends(current_user), db: Session = Depends(database)):
-    if kind == 'meetings':
-        rows, fields = meeting_rows(db, user, search, owner), MEETING_FIELDS
-    else:
-        rows = commission_data(page=1, page_size=1000000, search=search, quarter=quarter, owner=owner, category=kind, user=user, db=db)['rows']
-        fields = COMMISSION_FIELDS
-        from backend.bonus_transfer import export_commission
-        return export_commission(kind,rows,user,db)
-    audit(db, user.username, f'导出{kind}奖金表：{len(rows)}行')
-    db.commit()
-    return Response(workbook_bytes(rows, fields), media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': f'attachment; filename="{kind}.xlsx"'})

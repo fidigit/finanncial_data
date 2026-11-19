@@ -29,6 +29,19 @@ def source_samples_path():
 
 def initialize_rule_sources(db):
     from backend.app import SystemSetting, audit
+    revision='sales_rate_policy_20261119'
+    if not db.get(SystemSetting,revision):
+        common=db.get(SystemSetting,GLOBAL_KEY)
+        parameters=json.loads(common.value) if common else {}
+        parameters.update(self_rate='10',self_excess='15',market_rate='8',market_excess='13',
+                          partner_rate='5',partner_excess='10',renewal_rate='3',renewal_excess='5')
+        if common:
+            common.value=json.dumps(parameters,ensure_ascii=False)
+            common.version+=1
+        else:
+            db.add(SystemSetting(key=GLOBAL_KEY,value=json.dumps(parameters),version=1))
+        db.add(SystemSetting(key=revision,value='true',version=1))
+        audit(db,'system','应用销售四类双档提点：10/15、8/13、5/10、3/5')
     path = source_samples_path()
     samples = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
     for kind, key in [('services', PLAN_KEY), ('targets', TARGETS_KEY)]:

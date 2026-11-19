@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Alert, App, Button, Card, Empty, Input, Select, Space, Switch, Table, Tag, Tooltip } from 'antd';
 import { DatabaseOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api } from './api';
+import DataCardToggle from './DataCardToggle';
 
 type Row = { row_id: number; values: Record<string, string> };
 type Snapshot = {
@@ -15,6 +16,8 @@ const widths: Record<string, number> = { '季度': 105, 'BD姓名': 105, '运营
 
 export default function ReferenceDataTable() {
   const { message } = App.useApp();
+  const [expanded, setExpanded] = useState(false);
+  const contentId = useId();
   const [data, setData] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -26,6 +29,7 @@ export default function ReferenceDataTable() {
   const [policySaving, setPolicySaving] = useState(false);
   const policyVersion = useRef<number | null>(null);
   useEffect(() => {
+    if (!expanded) return;
     let active = true;
     const readPolicy = async () => {
       try {
@@ -39,8 +43,9 @@ export default function ReferenceDataTable() {
     };
     readPolicy();
     return () => { active = false; };
-  }, []);
+  }, [expanded]);
   useEffect(() => {
+    if (!expanded) return;
     const current = ++sequence.current;
     setLoading(true); setError('');
     const params = new URLSearchParams(Object.entries(query).map(([key, value]) => [key, String(value)]));
@@ -50,9 +55,23 @@ export default function ReferenceDataTable() {
       if (current === sequence.current) { setError(e.message); setData(null); }
     }).finally(() => { if (current === sequence.current) setLoading(false); });
     return () => { sequence.current++; };
-  }, [query, refresh]);
+  }, [expanded, query, refresh]);
+  function toggleExpanded() {
+    if (expanded) {
+      setData(null);
+      setPolicy(null);
+    }
+    setExpanded(!expanded);
+  }
   const filter = (key: string, value: string | undefined) => setQuery(q => ({ ...q, [key]: value || '', page: 1 }));
-  return <Card className="reference-data-card" title={<Space><DatabaseOutlined /><span>业务参考数据</span><Tag color="blue">CSV 样例</Tag></Space>} extra={<Button icon={<ReloadOutlined />} loading={loading} onClick={() => setRefresh(v => v + 1)}>刷新数据</Button>}>
+  return <Card className="reference-data-card"
+    title={<Space><DatabaseOutlined /><span>业务参考数据</span><Tag color="blue">CSV 样例</Tag></Space>}
+    styles={expanded ? undefined : { body: { display: 'none' } }}
+    extra={<Space>
+      {expanded && <Button icon={<ReloadOutlined />} loading={loading} onClick={() => setRefresh(v => v + 1)}>刷新数据</Button>}
+      <DataCardToggle title="业务参考数据" contentId={contentId} expanded={expanded} onToggle={toggleExpanded} />
+    </Space>}>
+    <div id={contentId} hidden={!expanded}>{expanded && <>
     <div className="reference-intro"><div>来源：<strong>{data?.source_name || '参考数据.csv'}</strong><span>可见记录 {data?.source_total.toLocaleString() ?? '—'} 行</span><span>{data?.columns.length ?? 18} 个字段</span>{data && <span>{data.access_scope === 'self' ? '仅本人账单' : '全部账单'}</span>}</div><p>按原始文件展示，奖金比例与金额保留源值。本表独立筛选，暂未联动下方演示奖金及其他模块。</p></div>
     <div className="reference-filters"><Input.Search allowClear value={searchInput} placeholder="搜索订单、BD、企业或任意字段" aria-label="搜索参考数据" style={{ width: 290 }} onChange={event => { const value = event.target.value; setSearchInput(value); if (!value) filter('search', ''); }} onSearch={value => filter('search', value)} enterButton="搜索" />
       {([
@@ -91,5 +110,6 @@ export default function ReferenceDataTable() {
       pagination={{ current: query.page, pageSize: query.page_size, total: data?.total || 0, showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: total => `筛选结果 ${total.toLocaleString()} 条`, onChange: (page, page_size) => setQuery(q => ({ ...q, page: page_size === q.page_size ? page : 1, page_size })) }}
       locale={{ emptyText: <Empty description={error ? '暂时无法读取参考数据' : '当前筛选条件下暂无记录'} /> }} />
     <div className="reference-footnote">空值显示为“—”；订单号重复保留，按原始数据行区分。后续接入 MySQL 时可替换数据读取层。</div>
+    </>}</div>
   </Card>;
 }

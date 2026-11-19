@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app import (app, database, current_user, admin, SystemSetting, audit,
-                         commission_snapshot, project_row, service_key, record_key, with_display_note)
+                         commission_snapshot, project_row, service_key, record_key, refund_key, with_display_note)
 from backend.bonus_v2 import save_setting
 from backend.bonus_rules import GLOBAL_KEY, shared_service_rule, source_target, target_entry, target_member_active, order_year, YEAR_PLAN_PREFIX
 from backend.sales_expression import SPECS, RULE_PARAMETERS, FormulaError, evaluate_formula, parse_formula
@@ -28,8 +28,9 @@ class PeriodInputs(BaseModel):
     market_rate: Decimal = Field(default=Decimal('8'), ge=0, le=100)
     market_excess: Decimal = Field(default=Decimal('13'), ge=0, le=100)
     partner_rate: Decimal = Field(default=Decimal('5'), ge=0, le=100)
-    partner_excess: Decimal = Field(default=Decimal('8'), ge=0, le=100)
+    partner_excess: Decimal = Field(default=Decimal('10'), ge=0, le=100)
     renewal_rate: Decimal = Field(default=Decimal('3'), ge=0, le=100)
+    renewal_excess: Decimal = Field(default=Decimal('5'), ge=0, le=100)
 
 
 class OrderInputs(BaseModel):
@@ -61,7 +62,7 @@ PERIOD_FIELDS = [
     ('self_rate', 'X 适用提点 / AA 提成计算2 · 自拓、目标内（%）', 'number'), ('self_excess', 'X 适用提点 / AA 提成计算2 · 自拓、超额（%）', 'number'),
     ('market_rate', 'X 适用提点 / AA 提成计算2 · 市场推荐、目标内（%）', 'number'), ('market_excess', 'X 适用提点 / AA 提成计算2 · 市场推荐、超额（%）', 'number'),
     ('partner_rate', 'X 适用提点 / AA 提成计算2 · 协会/合伙人、目标内（%）', 'number'), ('partner_excess', 'X 适用提点 / AA 提成计算2 · 协会/合伙人、超额（%）', 'number'),
-    ('renewal_rate', 'X 适用提点 · 续费（%）', 'number'),
+    ('renewal_rate', 'X 适用提点 · 续费目标内（%）', 'number'), ('renewal_excess', 'X 适用提点 · 续费超额（%）', 'number'),
 ]
 ORDER_FIELDS = [
     ('split_amount', '数据源-市场+销售 拆分订单 · 当前BD姓名列（金额，元）', 'number'), ('split_total', '数据源-市场+销售 拆分订单 · I 总计（元）', 'number'),
@@ -83,9 +84,9 @@ FORMULAS = [
     {'field': 'market_bd', 'title': '市场渠道', 'expression': '显示订单变量中的市场推荐BD姓名；O确认是否市场推荐，用于推导U渠道', 'variables': ['O是否市场推荐、市场BD姓名：订单变量', '来源订单渠道信息；单填姓名不自动确认推荐资格'], 'excel': 'O / U'},
     {'field': 'referral', 'title': '转介绍', 'expression': 'L为是时显示协会/合伙人及M名称；否则保留来源转介绍信息；客户推荐不自动套协会提点', 'variables': ['L是否协会/合伙人推荐、M名称：订单变量', 'U成单渠道：可明确确认；N推广金额仅核对'], 'excel': 'L / M / N / U'},
     {'field': 'revenue_total', 'title': '累计营收', 'expression': 'T = 同BD同季度按付款时间排序，截至本单的K累计；先计算全季度，再搜索/筛选/分页', 'variables': ['BD、季度、完整付款时间、K基数', '累计口径：默认包括不计提订单，保留来源重复行', '关闭包含不计提订单时，未知资格会阻断累计'], 'excel': 'T'},
-    {'field': 'confirmed_rate', 'title': '适用提点（分段提点）', 'expression': '未计提或全季度基数<门槛：0；续费：续费率；首购：U渠道基础/超额率，跨档显示两段', 'variables': ['W季度目标按BD季度；起提门槛、各渠道提点为全局参数', 'S资格、G首购/续费、U渠道、T累计、K本单基数', 'V超额、Z跨档：后台自动计算，不手工赋值', '人工提点覆盖：确认/修改，可清空恢复公式'], 'excel': 'X / U / V / W / Z'},
-    {'field': 'bonus', 'title': '奖金', 'expression': '目标内基数=min(K,max(W-本单前累计,0))；超额基数=K-目标内基数；AB=两段基数分别×提点之和；续费=K×续费率；不计提/未起提=0', 'variables': ['K、S、G、U、T、W、季度总基数、门槛、各提点', 'Y普通提成、AA分段提成、Z跨档：自动中间量', '人工奖金覆盖优先并标记，不自动发放；计算保留精度，页面显示2位'], 'excel': 'Y / Z / AA / AB'},
-    {'field': 'is_refunded', 'title': '是否退款', 'expression': '人工确认优先；否则AM退款金额>0为是，明确为0则否，缺失为待确认；不自动冲减AB', 'variables': ['AH退款日期、AI订单号、AJ原订单时间、AK商品、AM金额：订单变量', 'AL退款期间由AH生成；发放状态仍为人工确认'], 'excel': 'AH:AM'},
+    {'field': 'confirmed_rate', 'title': '适用提点（分段提点）', 'expression': '未计提或全季度基数<门槛：0；续费：目标内3%/超额5%；首购：渠道目标内/超额率，跨档显示两段', 'variables': ['W季度目标按BD季度；起提门槛、各渠道提点为全局参数', 'S资格、G首购/续费、U渠道、T累计、K本单基数', 'V超额、Z跨档：后台自动计算，不手工赋值', '人工提点覆盖：确认/修改，可清空恢复公式'], 'excel': 'X / U / V / W / Z'},
+    {'field': 'bonus', 'title': '奖金', 'expression': '目标内基数=min(K,max(W-本单前累计,0))；超额基数=K-目标内基数；AB=两段基数分别×提点之和；续费同样按目标内/超额两段计奖；不计提/未起提=0', 'variables': ['K、S、G、U、T、W、季度总基数、门槛、各提点', 'Y普通提成、AA分段提成、Z跨档：自动中间量', '人工奖金覆盖优先并标记，不自动发放；计算保留精度，页面显示2位'], 'excel': 'Y / Z / AA / AB'},
+    {'field': 'is_refunded', 'title': '是否退款', 'expression': '退款 CSV 订单号命中为是；保留其它订单已记录的退款状态；不自动冲减奖金', 'variables': ['AH退款日期、AI订单号、AJ原订单时间、AK商品、AM金额：订单变量', 'AL退款期间由AH生成；发放状态仍为人工确认'], 'excel': 'AH:AM'},
 ]
 
 
@@ -111,12 +112,18 @@ def global_parameters(settings):
     return {key: value for key, value in {**defaults, **stored(settings, GLOBAL_KEY, {})}.items() if key in defaults and key != 'target'}
 
 
+def effective_target(settings, owner, quarter):
+    if not target_member_active(settings, owner, quarter):
+        return None
+    entry = target_entry(settings, owner, quarter)
+    if entry is not None:
+        return entry.get('直接营收目标')
+    return stored(settings, setting_key('period', owner, quarter), {}).get('target')
+
+
 def effective_period(settings, owner, quarter):
     # Legacy per-BD constants remain archived but never override shared rules.
-    old = stored(settings, setting_key('period', owner, quarter), {})
-    entry = target_entry(settings, owner, quarter)
-    target = (entry.get('直接营收目标') if entry is not None else old.get('target')) if target_member_active(settings, owner, quarter) else None
-    return {**global_parameters(settings), 'target': target}
+    return {**global_parameters(settings), 'target': effective_target(settings, owner, quarter)}
 
 
 def calculate_sales(records, expressions=None):
@@ -171,14 +178,17 @@ def calculate_sales(records, expressions=None):
         row['allocation_ratio'] = str(ratio) if ratio is not None else None
         row['bonus_basis'] = str(basis) if basis is not None else None
         row['note'] = '；'.join(filter(None, [row['note'], v.get('special_note'), v.get('finance_note')]))
-        if c.get('is_refunded') is None and v.get('refund_amount') is not None:
+        if row['is_refunded'] is None and v.get('refund_amount') is not None:
             row['is_refunded'] = decimal(v['refund_amount']) > 0
+        if row['purchase_type']=='续费':
+            row['market_bd']=''
+            row['market_recommended']=False
+            row['referral']=''
         channel = v.get('channel', 'auto')
         if channel == 'auto':
             source, association, market = item['source'], v.get('association'), v.get('market_recommended')
-            if association is True or (association is None and any(x in source for x in ('协会推荐', '合伙人推荐'))): channel = 'partner'
+            if association is True or (association is None and any(x in source for x in ('协会推荐', '合伙人推荐', '客户推荐', '转介绍'))): channel = 'partner'
             elif market is True or (market is None and '市场同事推荐' in source): channel = 'market'
-            elif '客户推荐' in source and association is None: channel = 'pending'
             else: channel = 'self'
         try:
             stamp = datetime.fromisoformat(item['paid_at'])
@@ -192,6 +202,7 @@ def calculate_sales(records, expressions=None):
         def included(i): return i['basis'] if p['include_ineligible'] or i['row']['enabled'] else Decimal(0)
         quarter_total = None if bad_group else sum((included(i) for i in group), Decimal(0))
         accumulated = Decimal(0)
+        upgraded = False
         for item in sorted(group, key=lambda i: (i['stamp'] or datetime.max, i['row']['row_id'])):
             row, basis, channel, context = item['row'], item['basis'], item['channel'], dict(item['context'])
             c, problems = row['confirmation'], item['problems']
@@ -199,7 +210,7 @@ def calculate_sales(records, expressions=None):
             context.update({'前序累计': before, '本单计入基数': included(item) if not bad_group else None})
             accumulated = execute(item, 'T', context) if not bad_group else None
             target = decimal(p['target'])
-            over_target = accumulated > target if accumulated is not None and target is not None else None
+            over_target = (upgraded or accumulated > target) if accumulated is not None and target is not None else None
             base_parameter = decimal(p.get(channel + '_rate'))
             excess_parameter = decimal(p.get(channel + '_excess'))
             context.update({'T': accumulated, 'W': target, 'V': over_target,
@@ -207,6 +218,7 @@ def calculate_sales(records, expressions=None):
                             '季度基数合计': quarter_total, '起提门槛': decimal(p['threshold']),
                             '是否计发提成': row['enabled'], '购买性质': row['purchase_type'], '累计超过季度目标': over_target,
                             '续费提点': decimal(p['renewal_rate']) / 100,
+                            '续费超额提点': decimal(p['renewal_excess']) / 100,
                             '目标内提点': base_parameter / 100 if base_parameter is not None else None,
                             '超额提点': excess_parameter / 100 if excess_parameter is not None else None})
             rate = execute(item, 'X', context)
@@ -217,9 +229,9 @@ def calculate_sales(records, expressions=None):
                 problems.append('本季度存在无效金额/时间/资格，累计待核对')
             if rate is not None:
                 bonus = basis * rate if basis is not None else Decimal(0) if rate == 0 else None
-                if row['purchase_type'] in ('首购', '新客') and basis is not None and target is not None and accumulated is not None:
+                if row['purchase_type'] in ('首购', '新客', '续费') and basis is not None and target is not None and accumulated is not None:
                     # AA uses T-W and K; modifications to T therefore affect this order too.
-                    inside = min(basis, max(target - (accumulated - basis), Decimal(0)))
+                    inside = Decimal(0) if upgraded else min(basis, max(target - (accumulated - basis), Decimal(0)))
                     excess = basis - inside
                     crossing = inside > 0 and excess > 0
                     low = execute(item, 'X', {**context, 'V': False, '累计超过季度目标': False}) if inside else Decimal(0)
@@ -235,8 +247,10 @@ def calculate_sales(records, expressions=None):
                     problems.append('首购/续费类型未确认')
             if rate is None:
                 if row['enabled'] is None: problems.append(row.get('rule_note') or '待配置服务计提规则或本单确认')
-                elif target is None and row['purchase_type'] != '续费': problems.append('请配置该BD该季度的目标W')
+                elif target is None: problems.append('请配置该BD该季度的目标W')
                 elif channel == 'pending': problems.append('客户推荐需确认计奖渠道U')
+            if accumulated is not None and target is not None and accumulated >= target:
+                upgraded = True
             overrides = [name for key, name in [('enabled', '计提资格'), ('allocation_ratio', '分摊比例'), ('bonus_basis', '基数'), ('confirmed_rate', '提点'), ('bonus', '奖金')] if c.get(key) is not None]
             manual_rate = decimal(c.get('confirmed_rate'))
             if manual_rate is not None:
@@ -284,12 +298,14 @@ def sales_response(db, user, page, page_size, search, quarter, owner, expression
         rule = shared_service_rule(settings, service, values.get('订单金额'), period_inputs['vip_minimum'], order_year(values))
         if rule:
             rules[service] = rule
-        row = project_row(raw, rule, confirmation)
+        row = project_row(raw, rule, confirmation, refund_key(values.get('订单号', '')) in settings)
         variables=stored(settings, setting_key('order', key), OrderInputs().model_dump(mode='json'))
         if '_source_id' in values:
             source_amount=decimal(values.get('订单金额'))
             share=decimal(values.get('_share_amount'))
             market=values.get('_market_name','').strip()
+            if market in ('无','测试','null','None'):
+                market=''
             peers=shared_members[(values.get('订单号'),service)]
             variables={**variables,'split_amount':values.get('_share_amount') or None,
                        'split_total':str(source_amount) if source_amount is not None and source_amount>0 else None,

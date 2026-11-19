@@ -20,7 +20,8 @@ CONSTANTS = [
     ('市场推荐目标内提点', '8%', '⑮ 适用提点', 'X / AA'),
     ('市场推荐超额提点', '13%', '⑮ 适用提点', 'X / AA'),
     ('协会/合伙人目标内提点', '5%', '⑮ 适用提点', 'X / AA'),
-    ('协会/合伙人超额提点', '8%', '⑮ 适用提点', 'X / AA'),
+    ('转介绍超额提点', '10%', '⑮ 适用提点', 'X / AA'),
+    ('续费超额提点', '5%', '⑮ 适用提点', 'X / AA'),
 ]
 
 @app.get('/api/sales-workspace/sources/{kind}')
@@ -46,7 +47,7 @@ def source_preview(kind: str, user=Depends(current_user), db: Session = Depends(
     if kind == 'constants':
         from backend.sales_formulas import global_parameters
         params = global_parameters(settings)
-        keys = ['vip_minimum','threshold','renewal_rate','self_rate','self_excess','market_rate','market_excess','partner_rate','partner_excess']
+        keys = ['vip_minimum','threshold','renewal_rate','self_rate','self_excess','market_rate','market_excess','partner_rate','partner_excess','renewal_excess']
         columns = ['参数', '当前生效值', '配置入口', '引用节点']
         data = {'sheet': '销售原表公式中的固定值', 'columns': columns,
                 'rows': [dict(zip(columns, (row[0], str(params[key]) + ('元' if key in ('vip_minimum','threshold') else '%'), row[2], row[3]))) for key,row in zip(keys,CONSTANTS)]}
