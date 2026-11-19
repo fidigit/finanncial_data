@@ -74,6 +74,11 @@ def previous_quarter(quarter):
     return f'{year}Q{number-1}' if number > 1 else f'{year-1}Q4'
 
 
+def next_quarter(quarter):
+    year, number = int(quarter[:4]), int(quarter[-1])
+    return f'{year}Q{number+1}' if number < 4 else f'{year+1}Q1'
+
+
 def known_names(db):
     names = set(query_reference()['options']['owners'])
     names.update(db.scalars(select(User.name).where(User.role=='bd', User.active.is_(True), User.username.not_in(['bd.lin','bd.zhou']))))
@@ -115,10 +120,15 @@ def get_targets(quarter: Quarter | None = None, user=Depends(current_user), db: 
     quarters = sorted(target_quarters(settings, rows), reverse=True)
     selected = quarter or (quarters[0] if quarters else f'{date.today().year}Q{(date.today().month-1)//3+1}')
     prior = previous_quarter(selected)
+    following = next_quarter(selected)
     visible = [{field: r.get(field) for field in ('BD姓名', '季度', '直接营收目标')}
                for r in rows if r['季度']==selected and (user.role!='bd' or r['BD姓名'].strip()==user.name.strip())]
     return {'quarter':selected,'quarters':quarters,'rows':visible,'version':settings[TARGETS_KEY].version if TARGETS_KEY in settings else 0,
             'can_edit':user.role in ('admin','superadmin'),'previous_quarter':prior,'can_copy':prior in quarters,
+            'next_quarter':following,'can_copy_next':any(
+                row['季度'] == following and target_member_active(settings, row['BD姓名'], selected)
+                for row in rows
+            ),
             'exists':selected in quarters,
             'available_names':known_names(db) if user.role in ('admin','superadmin') else []}
 
@@ -137,7 +147,7 @@ def put_targets(quarter: Quarter, body:TargetUpdate, user=Depends(admin), db:Ses
     settings = all_settings(db)
     rows = target_rows(db,settings)
     if quarter not in target_quarters(settings, rows):
-        raise HTTPException(409,'本季度尚未建立，请先沿袭上一季度目标')
+        raise HTTPException(409,'本季度尚未建立，请先沿袭相邻季度目标')
     names = [r.owner.strip() for r in body.rows]
     if len(set(names))!=len(names) or any(r.owner!=r.owner.strip() for r in body.rows):
         raise HTTPException(422,'BD姓名重复或含有首尾空格')
@@ -158,22 +168,33 @@ def put_targets(quarter: Quarter, body:TargetUpdate, user=Depends(admin), db:Ses
 
 
 @app.post('/api/bonus-config/targets/{quarter}/inherit')
-def inherit_targets(quarter:Quarter,body:VersionBody,user=Depends(admin),db:Session=Depends(database)):
-    settings=all_settings(db)
-    rows=target_rows(db,settings)
-    if quarter in target_quarters(settings, rows):
-        raise HTTPException(409,'本季度已有目标，不能重复沿袭覆盖')
-    prior=previous_quarter(quarter)
-    previous={r['BD姓名']:r.get('直接营收目标') for r in rows if r['季度']==prior}
-    if prior not in target_quarters(settings, rows):
-        raise HTTPException(409,f'请先建立{prior}目标')
-    members=setting_payload(settings,TARGETS_KEY).get('memberships',{})
-    names=sorted(name for name in set(known_names(db))|set(previous)|set(members) if target_member_active(settings,name,quarter))
-    added=[{'BD姓名':name, '季度':quarter, '直接营收目标':previous.get(name)} for name in names]
-    save_targets(db,settings,rows+added,body.version,quarter=quarter)
-    audit(db,user.username,f'沿袭{prior}目标至{quarter}：{len(added)}位BD；未有原值的姓名保留待填写')
+def inherit_targets(quarter: Quarter, body: VersionBody, user=Depends(admin), db: Session=Depends(database),
+                    source_quarter: Quarter | None = None):
+    settings = all_settings(db)
+    rows = target_rows(db, settings)
+    quarters = target_quarters(settings, rows)
+    if quarter in quarters:
+        raise HTTPException(409, '本季度已有目标，不能重复沿袭覆盖')
+    prior, following = previous_quarter(quarter), next_quarter(quarter)
+    source = source_quarter or prior
+    if source not in (prior, following):
+        raise HTTPException(422, '请选择相邻季度的目标')
+    if source not in quarters:
+        raise HTTPException(409, f'请先建立{source}目标')
+    source_targets = {r['BD姓名']: r.get('直接营收目标') for r in rows if r['季度'] == source}
+    names = set(source_targets)
+    if source == prior:
+        # Existing forward inheritance includes blank goals for active BD not listed in the source.
+        names.update(known_names(db))
+        names.update(setting_payload(settings, TARGETS_KEY).get('memberships', {}))
+    added = [{'BD姓名': name, '季度': quarter, '直接营收目标': source_targets.get(name)}
+             for name in sorted(names) if target_member_active(settings, name, quarter)]
+    if source == following and not added:
+        raise HTTPException(409, f'{source}没有可沿袭至{quarter}的BD目标')
+    save_targets(db, settings, rows + added, body.version, quarter=quarter)
+    audit(db, user.username, f'沿袭{source}目标至{quarter}：{len(added)}位BD；未有原值的姓名保留待填写')
     db.commit()
-    return get_targets(quarter,user,db)
+    return get_targets(quarter, user, db)
 
 
 class TargetMember(VersionBody):

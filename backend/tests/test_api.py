@@ -1008,6 +1008,29 @@ def test_v005_targets_quarter_inheritance_edit_and_calculation(business_accounts
         assert bd.post('/api/bonus-config/targets/2027Q2/inherit',json={'version':0}).status_code==403
 
 
+def test_v014_targets_inherit_from_next_quarter_without_overwriting(business_accounts, v005_sources):
+    path = '/api/bonus-config/targets'
+    destination = path + '/2026Q2/inherit'
+    with client_as() as manager:
+        source = manager.get(path, params={'quarter': '2026Q3'}).json()
+        hire = manager.post(path + '/2026Q3/members', json={'owner': '第三季度入职', 'version': source['version']})
+        assert hire.status_code == 200
+        expected_source = hire.json()['rows']
+        empty = manager.get(path, params={'quarter': '2026Q2'}).json()
+        assert not empty['exists'] and empty['can_copy_next'] and empty['next_quarter'] == '2026Q3'
+        body = {'version': empty['version']}
+        assert manager.post(destination, params={'source_quarter': '2026Q4'}, json=body).status_code == 422
+        backwards = manager.post(destination, params={'source_quarter': '2026Q3'}, json=body)
+        assert backwards.status_code == 200, backwards.text
+        result = backwards.json()
+        assert result['exists'] and all(row['季度'] == '2026Q2' for row in result['rows'])
+        assert {r['BD姓名']: r['直接营收目标'] for r in result['rows']} == {'何卫': 60000, '屈敬东': 30000}
+        assert manager.get(path, params={'quarter': '2026Q3'}).json()['rows'] == expected_source
+        assert manager.post(destination, params={'source_quarter': '2026Q3'},
+                            json={'version': result['version']}).status_code == 409
+
+
+
 def test_v005_annual_plan_edit_new_service_year_isolation_and_inheritance(business_accounts,v005_sources):
     from backend.bonus_rules import shared_service_rule,order_year
     from backend.bonus_config import all_settings
